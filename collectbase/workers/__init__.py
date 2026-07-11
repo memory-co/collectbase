@@ -2,5 +2,7 @@
 from __future__ import annotations
 
 from .claude_code import ClaudeCodeWorker
+from .codex import CodexWorker
+from .openclaw import OpenclawWorker
 
-__all__ = ["ClaudeCodeWorker"]
+__all__ = ["ClaudeCodeWorker", "CodexWorker", "OpenclawWorker"]

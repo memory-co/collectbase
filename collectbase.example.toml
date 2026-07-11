@@ -18,3 +18,10 @@ source = "claude-code"
 # [[workers]]
 # source = "codex"
 # location = "~/.codex/sessions"
+
+# HTTP-backed source — no default location, polled every `poll`.
+# [[workers]]
+# source = "openclaw"
+# location = "https://openclaw.example.com/api"
+# auth_key = "…"
+# poll = "30s"
