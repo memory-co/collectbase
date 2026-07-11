@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from collectbase.format import (
@@ -58,6 +61,81 @@ class FakeSink:
             appended_count=len(req.rounds),
             round_count=s["count"],
         )
+
+
+class IngestStore:
+    """Sync mirror of FakeSink's cursor semantics, for the HTTP server."""
+
+    def __init__(self):
+        self.sessions: dict[str, dict] = {}
+        self.append_calls = 0
+
+    def ensure(self, b: dict) -> dict:
+        s = self.sessions.get(b["session_id"])
+        return {
+            "session_id": b["session_id"],
+            "last_round_id": s["last"] if s else None,
+            "round_count": s["count"] if s else 0,
+        }
+
+    def append(self, b: dict) -> dict:
+        self.append_calls += 1
+        sid = b["session_id"]
+        s = self.sessions.get(sid)
+        last = s["last"] if s else None
+        if last != b.get("expected_prev_round_id"):
+            return {"status": "conflict", "session_id": sid, "actual_last_round_id": last}
+        rounds = b.get("rounds") or []
+        if not rounds:
+            return {"status": "ok", "session_id": sid, "new_last_round_id": last,
+                    "appended_count": 0, "round_count": s["count"] if s else 0}
+        if not s:
+            s = self.sessions[sid] = {"last": None, "rounds": [], "count": 0}
+        s["rounds"].extend(rounds)
+        s["count"] += len(rounds)
+        s["last"] = rounds[-1]["round_id"]
+        return {"status": "ok", "session_id": sid, "new_last_round_id": s["last"],
+                "appended_count": len(rounds), "round_count": s["count"]}
+
+
+class _IngestHandler(BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        store = self.server.store  # type: ignore[attr-defined]
+        if self.path.endswith("/ensure"):
+            resp = store.ensure(body)
+        elif self.path.endswith("/append"):
+            resp = store.append(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        data = json.dumps(resp).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):  # silence
+        pass
+
+
+@contextmanager
+def run_ingest_server():
+    """Start a real local HTTP server speaking the ingest contract
+    (/v3/sessions/ensure + /append). Yields (base_url, store)."""
+    store = IngestStore()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _IngestHandler)
+    server.store = store  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", store
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:

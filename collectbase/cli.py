@@ -108,13 +108,16 @@ async def _status(cfg: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="collectbase")
-    parser.add_argument("--log-level", default="INFO")
+    # Shared options usable before OR after the subcommand.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--log-level", default="INFO")
+
+    parser = argparse.ArgumentParser(prog="collectbase", parents=[common])
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name in ("serve", "status"):
-        p = sub.add_parser(name)
+        p = sub.add_parser(name, parents=[common])
         p.add_argument("--config", "-c", required=True)
-    sub.add_parser("version")
+    sub.add_parser("version", parents=[common])
 
     args = parser.parse_args(argv)
     logging.basicConfig(

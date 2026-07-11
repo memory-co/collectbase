@@ -101,6 +101,11 @@ class Collectbase:
     async def close(self) -> None:
         await self.engine.stop()
         await self.checkpoints.close()
+        # Close the sink's transport if it owns one (e.g. HttpSink's
+        # httpx client). Sinks without an aclose (InProcessSink) are no-ops.
+        aclose = getattr(self.engine.sink, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     async def status(self) -> dict:
         s = self.engine.status()
