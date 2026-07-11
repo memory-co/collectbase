@@ -78,7 +78,9 @@ await cb.close()
 
 ## 4. worker 契约:pull + normalize
 
-**worker = adapter**:实现「怎么发现有新数据」「怎么增量读」「怎么归一」,engine 负责把它们串成同步循环。契约原样保留自 `adapters/base.py`(剥离时几乎逐字带走):
+> 编写 worker 的完整机制与编写指南(三档基类、声明式监听、`to_round` 例子、测试)见 **[docs/worker.md](docs/worker.md)**。本节只给底层裸端口契约。
+
+**worker = adapter**:实现「怎么发现有新数据」「怎么增量读」「怎么归一」,engine 负责把它们串成同步循环。契约原样保留自 `adapters/base.py`(剥离时几乎逐字带走)。**多数作者不直接写这四个方法**,而是继承 `JsonlWorker` / `FileWorker` 只写 `to_round`(docs/worker.md §1);裸端口留给 HTTP / 异形来源:
 
 ```
 worker 契约:
@@ -97,6 +99,8 @@ worker 契约:
 - **现有三个 adapter 原地变身三个 worker**:claude-code / codex(fs 型,已实现)+ openclaw(HTTP 型,当前 stub)。
 
 ## 5. 标准 session 格式(normalize 的目标)
+
+> 字段全表、构造器(`Round` / `Text` / `ToolUse` …)、幂等规则、role/speaker 分类经验见 **[docs/session-format.md](docs/session-format.md)**。
 
 worker 归一的落点、也是 sink 的 wire 格式。**故意 free-form**:平台会吐 text / code / thinking / tool_use / tool_result……如实保留,下游(read 展示、FTS 抽取)自己投影。
 
