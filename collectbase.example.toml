@@ -1,0 +1,20 @@
+# collectbase config — `collectbase serve -c collectbase.toml`
+
+# Where the checkpoint db (sync.db) lives.
+checkpoint_dir = "./collect"
+
+# Where normalized sessions are pushed. Only the http sink is usable
+# from the CLI; embed collectbase as a library for InProcessSink.
+[sink]
+type = "http"
+base_url = "http://localhost:8000"
+# api_key = "…"                      # optional bearer token (cloud form)
+
+# One [[workers]] block per source. `location` is optional when the
+# worker has a default (claude-code defaults to ~/.claude/projects).
+[[workers]]
+source = "claude-code"
+
+# [[workers]]
+# source = "codex"
+# location = "~/.codex/sessions"

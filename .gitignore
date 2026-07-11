@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# venv
+.venv/
+venv/
+
+# collectbase runtime state
+collect/
+*.db
+*.db-wal
+*.db-shm
+
+# test / tooling
+.pytest_cache/
+.coverage
