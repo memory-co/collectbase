@@ -1,29 +1,33 @@
-import asyncio
+"""OpenclawWorker — the polling (non-file) tier.
 
-from collectbase.checkpoint import CheckpointStore
+No files on disk: the engine polls ``list_remote`` and pulls ``fetch``,
+and per-session change detection rides the ETag (probe.sha256). These
+scenarios replace the HTTP layer with an in-memory remote so we can drive
+the ETag lifecycle deterministically — bump the etag, expect a re-sync;
+leave it, expect a short-circuit.
+"""
+from __future__ import annotations
+
 from collectbase.engine import Engine
 from collectbase.workers.openclaw import OpenclawWorker
-from conftest import FakeSink
 
 
 class FakeOpenclaw(OpenclawWorker):
-    """OpenclawWorker with the HTTP layer replaced by an in-memory store.
-    ``state`` holds the remote sessions + rounds; ``etags`` drives change
-    detection so we can prove the engine short-circuits on an unchanged
-    ETag and re-syncs when it bumps."""
+    """OpenclawWorker with ``_get_json`` served from an in-memory dict.
+    ``remote`` maps session id → {etag, cwd?, rounds:[{id,role,ts,content}]}."""
 
-    def __init__(self, state, **kw):
+    def __init__(self, remote, **kw):
         super().__init__(location="https://openclaw.test", **kw)
-        self._state = state
+        self.remote = remote
 
     def _get_json(self, path, params=None):
         if path == "/sessions":
             return {"sessions": [
                 {"id": sid, "etag": s["etag"], "created_at": s.get("created_at", ""), "cwd": s.get("cwd")}
-                for sid, s in self._state.items()
+                for sid, s in self.remote.items()
             ]}
         sid = path.rsplit("/", 1)[1]
-        rounds = self._state[sid]["rounds"]
+        rounds = self.remote[sid]["rounds"]
         after = (params or {}).get("after")
         if after:
             ids = [r["id"] for r in rounds]
@@ -31,44 +35,58 @@ class FakeOpenclaw(OpenclawWorker):
         return {"rounds": rounds}
 
 
-def test_list_remote_and_fetch_shapes():
-    state = {"s1": {"etag": "v1", "cwd": "/p", "rounds": [
+def _remote_one_session():
+    return {"s1": {"etag": "v1", "cwd": "/p", "rounds": [
         {"id": "r1", "role": "human", "ts": "t1", "content": [{"type": "text", "text": "hi"}]},
         {"id": "r2", "role": "assistant", "ts": "t2", "content": [{"type": "text", "text": "yo"}]},
     ]}}
-    w = FakeOpenclaw(state)
-    probes = list(w.list_remote())
-    assert len(probes) == 1 and probes[0].session_id == "s1" and probes[0].sha256 == "v1"
-    rounds = list(w.fetch("s1", None))
-    assert [r.round_id for r in rounds] == ["r1", "r2"]
-    assert rounds[0].content[0].text == "hi"
 
 
-def test_engine_syncs_polls_and_etag_short_circuits(tmp_path):
-    async def go():
-        state = {"s1": {"etag": "v1", "rounds": [
+# ────────── shape of what the worker returns ──────────
+
+
+class TestRemoteShapes:
+
+    def test_list_remote_maps_sessions_with_etag_as_the_cursor(self):
+        worker = FakeOpenclaw(_remote_one_session())
+        probes = list(worker.list_remote())
+        assert len(probes) == 1
+        assert probes[0].session_id == "s1"
+        assert probes[0].sha256 == "v1"  # etag drives change detection
+        assert probes[0].metadata["cwd"] == "/p"
+
+    def test_fetch_normalizes_rounds(self):
+        worker = FakeOpenclaw(_remote_one_session())
+        rounds = list(worker.fetch("s1", after_round_id=None))
+        assert [r.round_id for r in rounds] == ["r1", "r2"]
+        assert rounds[0].content[0].text == "hi"
+
+
+# ────────── ETag lifecycle through the engine ──────────
+
+
+class TestEtagLifecycle:
+
+    async def test_unchanged_etag_short_circuits_new_rounds_resync(self, checkpoints, sink):
+        remote = {"s1": {"etag": "v1", "rounds": [
             {"id": "r1", "role": "human", "content": [{"type": "text", "text": "hi"}]},
         ]}}
-        sink = FakeSink()
-        w = FakeOpenclaw(state, poll="30s")
-        ckpt = await CheckpointStore.open(tmp_path / "sync.db")
-        engine = Engine([w], sink, ckpt)
+        worker = FakeOpenclaw(remote, poll="30s")
+        engine = Engine([worker], sink, checkpoints)
+        sid = worker.mint_session_id("s1")
 
-        # First pass imports r1.
-        await engine._sync_one_source(w, "s1")
-        sid = w.mint_session_id("s1")
-        assert [r.round_id for r in sink.sessions[sid]["rounds"]] == ["r1"]
+        # First poll imports r1.
+        await engine._sync_one_source(worker, "s1")
+        assert sink.rounds_of(sid) == ["r1"]
 
-        # Same ETag → short-circuit, no append.
+        # Same etag → the engine skips before it even asks the sink.
         calls = sink.append_calls
-        await engine._sync_one_source(w, "s1")
+        await engine._sync_one_source(worker, "s1")
         assert sink.append_calls == calls
 
-        # New round + bumped ETag → incremental append of r2.
-        state["s1"]["rounds"].append({"id": "r2", "role": "assistant", "content": [{"type": "text", "text": "yo"}]})
-        state["s1"]["etag"] = "v2"
-        await engine._sync_one_source(w, "s1")
-        assert [r.round_id for r in sink.sessions[sid]["rounds"]] == ["r1", "r2"]
-        await ckpt.close()
-
-    asyncio.run(go())
+        # New round + bumped etag → only the new round is pulled.
+        remote["s1"]["rounds"].append({"id": "r2", "role": "assistant",
+                                       "content": [{"type": "text", "text": "yo"}]})
+        remote["s1"]["etag"] = "v2"
+        await engine._sync_one_source(worker, "s1")
+        assert sink.rounds_of(sid) == ["r1", "r2"]

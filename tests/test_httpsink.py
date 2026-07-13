@@ -1,80 +1,75 @@
-"""End-to-end over real HTTP — proves collectbase runs standalone against
-any server speaking the ingest contract, with no in-process coupling.
+"""Standalone over real HTTP — collectbase against a memory it only knows
+by the wire contract.
 
-A stdlib HTTP server (tests/conftest.run_ingest_server) plays the memory
-side; the full stack (Collectbase facade → engine → HttpSink → wire)
-drives it. No memory.talk import anywhere.
+A stdlib HTTP server (conftest.run_ingest_server) plays the memory side,
+speaking /v3/sessions/ensure + /append. The full stack drives it through
+the ``HttpSink``, with no memory.talk anywhere in the process. These are
+the same backfill / live-watch stories as test_engine, but proving they
+survive a JSON round-trip over a socket.
 """
-import asyncio
+from __future__ import annotations
 
 from collectbase import Collectbase, HttpSink
-from collectbase.checkpoint import CheckpointStore
-from collectbase.engine import Engine
 from collectbase.workers.claude_code import ClaudeCodeWorker
-from conftest import CC_RECORDS, append_jsonl, run_ingest_server, write_jsonl
+from conftest import (
+    CLAUDE_CHAT,
+    append_jsonl,
+    cc_msg,
+    run_ingest_server,
+    stage_claude_session,
+    wait_for_phase,
+    wait_until,
+)
 
 
-def test_engine_over_http_import_then_incremental(tmp_path):
-    async def go():
+class TestOverHttp:
+
+    async def test_prepared_session_lands_over_the_wire(self, tmp_path):
         with run_ingest_server() as (base_url, store):
-            root = tmp_path / "projects"
-            f = root / "proj-x" / "s.jsonl"
-            write_jsonl(f, CC_RECORDS)
-
+            root = tmp_path / "claude"
+            stage_claude_session(root, "proj", "chat", CLAUDE_CHAT)
+            worker = ClaudeCodeWorker(location=str(root))
             sink = HttpSink(base_url)
-            ckpt = await CheckpointStore.open(tmp_path / "sync.db")
-            engine = Engine([ClaudeCodeWorker(location=str(root))], sink, ckpt)
 
-            # Import over the wire.
-            await engine._run_backfill()
-            assert len(store.sessions) == 1
-            sess = next(iter(store.sessions.values()))
-            assert [r["round_id"] for r in sess["rounds"]] == ["u1", "a1", "t1"]
-
-            # Unchanged → sha short-circuit, no HTTP append.
-            calls = store.append_calls
-            await engine._run_backfill()
-            assert store.append_calls == calls
-
-            # Incremental append over the wire.
-            append_jsonl(f, [{"type": "assistant", "uuid": "a2",
-                              "message": {"content": [{"type": "text", "text": "more"}]}}])
-            await engine._run_backfill()
-            sess = next(iter(store.sessions.values()))
-            assert [r["round_id"] for r in sess["rounds"]] == ["u1", "a1", "t1", "a2"]
-
-            await ckpt.close()
-            await sink.aclose()
-
-    asyncio.run(go())
-
-
-def test_facade_lifecycle_over_http(tmp_path):
-    """Collectbase.open → start (backfill to 'watching') → close, with a
-    real HttpSink. close() must also shut the sink's transport."""
-    async def go():
-        with run_ingest_server() as (base_url, store):
-            root = tmp_path / "projects"
-            write_jsonl(root / "p" / "s.jsonl", CC_RECORDS)
-
-            sink = HttpSink(base_url)
-            cb = await Collectbase.open(
-                checkpoint_dir=tmp_path / "collect",
-                sink=sink,
-                workers=[ClaudeCodeWorker(location=str(root))],
-            )
+            cb = await Collectbase.open(checkpoint_dir=tmp_path / "collect",
+                                        sink=sink, workers=[worker], debounce_ms=50)
             await cb.start()
-            for _ in range(200):
-                if cb.engine.phase == "watching":
-                    break
-                await asyncio.sleep(0.02)
-            assert cb.engine.phase == "watching"
-            st = await cb.status()
-            assert st["checkpoints"] == 1
-            assert len(store.sessions) == 1
+            await wait_for_phase(cb, "watching")
 
+            sid = worker.mint_session_id("chat")
+            assert store.rounds_of(sid) == ["u1", "a1", "t1"]
             await cb.close()
-            # sink transport closed by facade.close()
-            assert sink._client.is_closed
 
-    asyncio.run(go())
+    async def test_appended_round_is_pushed_live_over_http(self, tmp_path):
+        with run_ingest_server() as (base_url, store):
+            root = tmp_path / "claude"
+            f = stage_claude_session(root, "proj", "chat", CLAUDE_CHAT)
+            worker = ClaudeCodeWorker(location=str(root))
+            sink = HttpSink(base_url)
+
+            cb = await Collectbase.open(checkpoint_dir=tmp_path / "collect",
+                                        sink=sink, workers=[worker], debounce_ms=50)
+            await cb.start()
+            await wait_for_phase(cb, "watching")
+            sid = worker.mint_session_id("chat")
+
+            append_jsonl(f, [cc_msg("a2", "more", mtype="assistant", parent="t1")])
+            await wait_until(lambda: "a2" in store.rounds_of(sid),
+                             what="appended round pushed over HTTP")
+            assert store.rounds_of(sid) == ["u1", "a1", "t1", "a2"]
+            await cb.close()
+
+    async def test_close_shuts_the_http_transport(self, tmp_path):
+        """The facade owns the sink's lifecycle: close() must also close
+        the HttpSink's client, so nothing leaks."""
+        with run_ingest_server() as (base_url, _store):
+            root = tmp_path / "claude"
+            stage_claude_session(root, "proj", "chat", CLAUDE_CHAT)
+            sink = HttpSink(base_url)
+            cb = await Collectbase.open(checkpoint_dir=tmp_path / "collect", sink=sink,
+                                        workers=[ClaudeCodeWorker(location=str(root))],
+                                        debounce_ms=50)
+            await cb.start()
+            await wait_for_phase(cb, "watching")
+            await cb.close()
+            assert sink._client.is_closed
