@@ -8,11 +8,27 @@ version = "0.1.0"
 description = "Ingestion boundary — collect raw sessions from many sources, normalize, push to a memory system."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "memory.co", email = "twwy.zh@gmail.com" }]
+keywords = ["memory", "ingestion", "sync", "agents", "sessions", "connector"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Framework :: AsyncIO",
+]
 dependencies = [
     "pydantic>=2",
     "aiosqlite>=0.19",
 ]
+
+[project.urls]
+Homepage = "https://github.com/memory-co/collectbase"
+Repository = "https://github.com/memory-co/collectbase"
 
 [project.optional-dependencies]
 # File-watching workers (fs events). Without it, the engine still runs
