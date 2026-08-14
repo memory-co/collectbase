@@ -174,7 +174,15 @@ raise SystemExit(commit_msg(sys.argv[1:]))
 | `post-checkout` | 重打 chmod:非顶层 444,顶层可写 | [DESIGN §5](../DESIGN.md) |
 | `reference-transaction` | **真正的闸**:检查 `old..new` 里每个提交是否合规,不合规就否决整个 ref 事务(§4) | 本篇 |
 
-**仓库未初始化 / 当前分支不是写入面 / HEAD 游离时,所有 hook 直接放行。** 不在一个没打算用 collectbase 的场合里挡人。
+**分支分三类,hook 的行为不同**(这一点之前写得自相矛盾,现在定死):
+
+| 分支 | `commit-msg` / 守卫 |
+|---|---|
+| **写入面** `stack/<最长>` | 全套校验 |
+| **派生分支** `layer/*`、更短的 `stack/*` | **拒绝直接提交**——它们是生成物,只能由投影/重算更新 |
+| **其他分支**(`main`、`scratch`、…) | **完全放行**,collectbase 不管 |
+
+仓库未初始化、HEAD 游离时同样直接放行。不在一个没打算用 collectbase 的场合里挡人。
 
 ### 解释器的坑
 
@@ -246,6 +254,57 @@ hook 文件是被跟踪的,所以**不能把 venv 的绝对路径写死在 sheba
 
 最后两行是这个改法的价值所在:**判据是内容,所以合规的 cherry-pick 自然就该放行**,不需要为它开特例;而不合规的东西,无论走哪条 git 命令都进不来。
 
+### 守卫本身的五条规则(自查补出来的,少一条就出事)
+
+前四条是实测撞出来的,不是推演。
+
+**① 删除必须放行,否则 `git gc` 直接坏掉。**
+
+`git pack-refs` 把 loose ref 迁进 `packed-refs` 时,会呈现为一次 `new = 0000…` 的**删除**事务。守卫若对它做 FF 检查,`git gc` 会报:
+
+```
+fatal: ref updates aborted by hook
+fatal: failed to run pack-refs
+```
+
+所以 `new` 全零时直接放行。代价是 `git branch -D stack/…` 也放行了——可接受:内容都在 `layer/*` 里,reflog 也在,`cb check` 会立刻报出来。
+
+**② `layers` 必须从 `old` 读,不能从 `new` 读。**
+
+从 `new` 读等于让提交**给自己发证**:一个提交可以同时往 `layers` 里加一行 `evil`、又用 `[evil]` 当自己的标签,守卫查 `new:layers` 时那一行已经在了。实测确认这个洞真实存在,写入面被 `[evil] 我自己给自己发的证` 推进了一格。
+
+改成从 `old`(更新前的状态)读之后:
+
+```
+✗ 未知层 [evil](按更新前的 layers 判定)
+fatal: ref updates aborted by hook
+```
+
+于是加层必须是**两次提交**:先一个 `[facts]` 提交改 `layers`,再用新层。这正好也是想要的——拓扑变更独立成一次提交,可审计。
+
+顺带两条:改 `layers` 的提交**只应改 `layers`**(别和内容混在一起),**删除 `layers` 文件要拒绝**。
+
+**③ 写入面有未投影的提交时,拒收新提交。**
+
+守卫靠 `layer/*` 的树判断路径归属,而 `layer/*` 是 `post-commit` 更新的。如果投影没跑完,一个刚进事实层的新路径还不在 `layer/facts` 里,下一个 `[beliefs]` 提交就能把它据为己有——归属判据在那一瞬间是失真的。
+
+规则:**写入面领先于投影时,拒绝接受新提交**,先把投影补齐(下次 `post-commit` 会按 `Cb-Stack` trailer 为界自动补)。
+
+**④ `120000` 条目的目标必须落在 `blob/` 内。**
+
+blob 机制假定所有软链都指向 `blob/`,但上层完全可以提交一个指向别处的软链。实测 `project/leak.txt -> /etc/hostname` 顺利进入了仓库:
+
+```
+120000 blob 48980ad…    project/leak.txt
+→ /etc/hostname
+```
+
+所以守卫要求:软链目标必须是**相对路径**,且解析后**落在仓库内的 `blob/` 目录下**。其余一律拒绝。
+
+**⑤ 路径比对要大小写折叠。**
+
+大小写不敏感的文件系统上,`Facts/a.md` 和 `facts/a.md` 是两个 git 路径、同一个磁盘文件。归属比对不折叠的话,上层可以用改大小写的方式"新建"一个实际会覆盖下层文件的路径。
+
 ### 顺带堵上了 `--no-verify`
 
 `--no-verify` 跳过的是 `pre-commit` 和 `commit-msg`,**它不是 `reference-transaction` 的开关**——那个钩子照跑。上表第二、三行就是实测:带着 `--no-verify` 提交一个无标签的、或者改了事实层文件的提交,一样被拒。
@@ -302,9 +361,10 @@ $ cb check
   I2 一致       ✓  stack/* 的树与并集逐字相同
   I3 线性       ✓  无 merge 节点;全部分支 fast-forward
   I4 对应       ✓  layer/* 的 87 个提交都有 Cb-Stack trailer
-  I5 blob       ✗  2 个缺失、1 个哈希不匹配
+  I5 blob       ✗  2 个缺失、1 个哈希不匹配、1 条逃逸软链
                    缺失  blob/2026/07/23/f1a4f2…ac.png  ← layer/facts
                    篡改  blob/2026/07/19/6dd875…9d.png  ← layer/facts
+                   逃逸  project/leak.txt -> /etc/hostname  ← layer/notes
                    缺失的从别处拉回来:rsync -a host:path/blob/ blob/
                    哈希不匹配意味着有人绕过机制改了字节,不自动处理
   exit 3
@@ -348,7 +408,9 @@ $ cb check
 
 ## 7. 待定
 
-- **多 clone 协作。** §4 ② 那条规则(拦下 `fetch`/`pull` 对 `stack/*` 的更新)在单机下是对的,多 clone 时要重新设计——多半要和服务端 `pre-receive`(主设计 §13)一起考虑。
+- **多 clone 协作。** `fetch`/`pull` 对 `stack/*` 的更新走同一套检查,单机下正确;多 clone 时派生分支的检查要重新设计(远端的 `layer/*` 未必和本地一致),多半要和服务端 `pre-receive`(主设计 §14)一起考虑。
+- **submodule(`160000` 条目)完全没规定。** 归属怎么算、算不算二进制、`cb check` 怎么验,都还没想。
+- **投影的并发锁。** `post-commit` 里的投影 + 重算要串行,锁放哪、等多久、超时怎么办。
 - **`layers` 顶部追加一层时写入面上移**,用户/智能体正停在旧写入面上。怎么提示、要不要自动 checkout。
 - **多仓库共享 blob 库。**
 - **`cb blob gc` 的时机。** 手动,还是 `post-commit` 按阈值触发?活集要遍历 `git rev-list --all` 的全部树,不便宜。
