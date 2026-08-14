@@ -169,10 +169,10 @@ raise SystemExit(commit_msg(sys.argv[1:]))
 | hook | 干什么 | 出处 |
 |---|---|---|
 | `pre-commit` | 二进制转 blob + 软链;记下将被孤立的 OID | [blob-store §2](blob-store.md) |
-| `commit-msg` | 三条校验(§4);通过后放行令牌 | [branch-topology §3](branch-topology.md) |
-| `post-commit` | 投影 + 重算;补主索引;定点清孤儿;`layers` 变更时调整分支集合;最后收回令牌 | [branch-topology §4](branch-topology.md) |
+| `commit-msg` | 三条校验,快速反馈(§4);可被 `--no-verify` 跳过,不是最终防线 | [branch-topology §3](branch-topology.md) |
+| `post-commit` | 投影 + 重算;补主索引;定点清孤儿;`layers` 变更时调整分支集合 | [branch-topology §4](branch-topology.md) |
 | `post-checkout` | 重打 chmod:非顶层 444,顶层可写 | [DESIGN §5](../DESIGN.md) |
-| `reference-transaction` | 否决一切未经 collectbase 的 `layer/*` `stack/*` 更新(§4) | 本篇 |
+| `reference-transaction` | **真正的闸**:检查 `old..new` 里每个提交是否合规,不合规就否决整个 ref 事务(§4) | 本篇 |
 
 **仓库未初始化 / 当前分支不是写入面 / HEAD 游离时,所有 hook 直接放行。** 不在一个没打算用 collectbase 的场合里挡人。
 
@@ -196,7 +196,7 @@ hook 文件是被跟踪的,所以**不能把 venv 的绝对路径写死在 sheba
 
 问题是:**草稿分支上的内容,能不能绕过 `[层名]` 校验捅进写入面?**
 
-### 实测:四条路里三条能绕过
+### 先看清楚:`commit-msg` 覆盖不了
 
 在写入面上对一条无标签的 `other` 分支执行各种操作,看 `commit-msg` 是否被调用:
 
@@ -211,64 +211,81 @@ hook 文件是被跟踪的,所以**不能把 venv 的绝对路径写死在 sheba
 
 `commit-msg` 只覆盖"新写一个提交"这一条路。**凡是移动 ref 而不新建提交内容的操作,它全看不见。**
 
-### 解法:`reference-transaction`
+### 解法:检查内容,不检查来源
 
-git 2.28+ 的 `reference-transaction` 钩子在**每一次 ref 更新**时触发,并且在 `prepared` 阶段**能否决整个事务**。它是唯一一个覆盖 merge-FF / reset / rebase / push 的钩子。
+关键的转念:**不要问"这次更新是谁发起的",要问"落进去的每个提交合不合规"。**
 
-```python
-# reference-transaction  (prepared 阶段,stdin 逐行 "<old> <new> <ref>")
-for old, new, ref in updates:
-    if not ref.startswith(("refs/heads/layer/", "refs/heads/stack/")):
-        continue                       # 别的分支,不管
-    if old == new:
-        continue                       # pack-refs 之类的无变化事务
-    if token_present():
-        continue                       # collectbase 自己发起的
-    reject(f"{ref} 只能由 collectbase 更新")
-```
-
-**令牌协议**:`commit-msg` 校验通过后在 `$(git rev-parse --git-dir)/cb-allow` 放一个令牌;`post-commit` 在**做完投影和重算的所有 `update-ref` 之后**才收回。这样合法提交及其派生的 ref 更新都能通过,其余一律被否。
-
-实测:
+`reference-transaction`(git 2.28+)在**每一次 ref 更新**的 `prepared` 阶段触发,并且**能否决整个事务**。它拿得到 `old` 和 `new`,而此时提交对象已经存在,所以可以直接把 `old..new` 走一遍:
 
 ```
-$ git reset --hard other
-  [ref-txn] 拒绝更新 refs/heads/stack/top —— 未经 collectbase
-  fatal: ref updates aborted by hook
-  → 写入面 = 71f41cc  ([facts] base)          ← 没动
+对 refs/heads/stack/<最长> 的更新 old → new:
 
-$ git merge other
-  [ref-txn] 拒绝更新 refs/heads/stack/top —— 未经 collectbase
-  fatal: ref updates aborted by hook
-  → 写入面 = 71f41cc  ([facts] base)          ← 没动
-
-$ git commit -m "[facts] 正常提交"
-  [hook] pre-commit
-  [hook] commit-msg 校验通过,放令牌
-  [hook] post-commit 收令牌
-  → 写入面 = 6253a06  ([facts] 正常提交)      ← 放行
+  ① old 必须是 new 的祖先                  否则拒绝(rebase / reset / force 改写已有历史)
+  ② old..new 里不能有 merge 节点            否则拒绝
+  ③ old..new 里的每个提交:
+       - 信息以合法的 [层名] 开头            否则拒绝
+       - 改动的路径不属于别的层              否则拒绝,并指出归谁
 ```
 
-`git rebase`、`git cherry-pick` 同理被拦——它们最终都要更新 `refs/heads/stack/*`。
+**没有令牌,没有白名单,不关心你用的是哪条 git 命令。**合规就进,不合规就退,`git` 自己会说 `fatal: ref updates aborted by hook` 并把 ref 原样留在那里。
 
-### 于是"其他分支"的规矩很清楚
+### 实测:七种情况
 
-- **随便建、随便提交、随便 rebase**,collectbase 不管。
-- **想把成果拿进来,只有一条路:在写入面上正常提交。**
+| 操作 | 结果 |
+|---|---|
+| `git commit -m "[facts] 正常提交"` | ✅ 放行 |
+| `git commit --no-verify -m "偷偷提交"` | ✗ **拒绝**:没有 `[层名]` 前缀 |
+| `git commit --no-verify -m "[notes] 顺手改事实"` | ✗ **拒绝**:`project/a.md` 属于层 `[facts]` |
+| `git merge other`(FF,带无标签提交) | ✗ 拒绝:那个提交没有 `[层名]` |
+| `git merge --no-ff other` | ✗ 拒绝:新增范围里有 merge 节点 |
+| `git reset --hard other` | ✗ 拒绝 |
+| `git cherry-pick <无标签提交>` | ✗ 拒绝 |
+| **`git cherry-pick <合规的 [notes] 提交>`** | ✅ **放行** |
+
+每一次拒绝之后写入面都纹丝不动。
+
+最后两行是这个改法的价值所在:**判据是内容,所以合规的 cherry-pick 自然就该放行**,不需要为它开特例;而不合规的东西,无论走哪条 git 命令都进不来。
+
+### 顺带堵上了 `--no-verify`
+
+`--no-verify` 跳过的是 `pre-commit` 和 `commit-msg`,**它不是 `reference-transaction` 的开关**——那个钩子照跑。上表第二、三行就是实测:带着 `--no-verify` 提交一个无标签的、或者改了事实层文件的提交,一样被拒。
+
+这把主设计 §13 ① 那条弱点降了一级:**在 git 命令这一层,地板不再是软的。**剩下的绕法只有"直接手写 `.git/refs/…` 或 packed-refs"和"把 `core.hooksPath` 拆掉"——那是拆机制,不是绕机制,性质不同。
+
+### `commit-msg` 降级成 UX
+
+同一条规则现在有两个执行点:
+
+- **`commit-msg`** —— 提交对象还没建的时候就拒绝,给一段好读的、带替代动作的错误信息(§6)。快,友好,但可被 `--no-verify` 跳过。
+- **`reference-transaction`** —— 真正的闸。跳不过,但它拒绝的时候提交对象已经建好了(悬空,等 gc),错误信息也更机械。
+
+**两者跑同一条规则,一份实现,两个执行点。**前者为体验,后者为保证。
+
+### 派生分支同理
+
+`layer/*` 和更短的 `stack/*` 也归 `reference-transaction` 管,规则换成"必须是一次正确的投影 / 重算":新提交的树要等于按当前 `layer/*` 算出的过滤树 / 并集树,且 `layer/*` 的提交要带 `Cb-Stack` trailer 指回写入面。同样是内容检查,同样不需要令牌。
+
+### 于是"其他分支"的规矩
+
+- **随便建、随便提交、随便 rebase**,collectbase 完全不管。
+- **想把成果拿进来**,提交本身合规就行:
 
   ```sh
-  git checkout stack/beliefs
-  git checkout scratch -- path/to/file      # 把文件取过来
-  git commit -m "[beliefs] …"               # 走正常校验
+  git cherry-pick <那个 [beliefs] 提交>       # 合规就直接过
   ```
 
-  `cherry-pick` 不行——它不跑 `commit-msg`,会被 `reference-transaction` 拦在最后一步,而且拦下时你已经处理完冲突了,体验很差。文档和错误信息里要直接给上面这条 recipe。
+  不合规的话,取文件重提:
+
+  ```sh
+  git checkout scratch -- path/to/file
+  git commit -m "[beliefs] …"
+  ```
 
 ### 三点要照实说
 
-1. **令牌是文件,不是密钥。** 能写文件的进程就能伪造它。这道闸挡的是"顺手一个 `git reset` 把写入面搞坏",不是对抗——和 §12 里其余几道防线同一级别。
-2. **`git fetch` / `git pull` 更新 `stack/*` 也会被拦。** 单机场景下这是对的(远端内容必须走正常路径进来)。将来做多 clone 协作时,这条规则要重新设计。
-3. **`reference-transaction` 会被非常频繁地调用**,实现必须极快:先做前缀匹配,不匹配立刻退出,别在里面跑 git 命令。
+1. **手写 `.git/refs/…` 绕得过。** `reference-transaction` 只在 git 自己的 ref 事务里触发。这是剩下的洞,见主设计 §13。
+2. **`git fetch` / `git pull` 更新 `stack/*` 也会走这套检查** —— 远端来的提交同样要合规。单机场景下正确;多 clone 协作时,派生分支的检查要重新设计(远端的 `layer/*` 未必和本地一致)。
+3. **这个钩子被调用得非常频繁**,实现必须极快:先做 ref 前缀匹配,不匹配立刻退出;`old..new` 通常只有一个提交,别在里面做全库扫描。
 
 ---
 

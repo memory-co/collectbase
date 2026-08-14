@@ -124,18 +124,20 @@ own(Lᵢ) = tree(layer/Lᵢ) 里的全部路径
 
 ---
 
-## 5. 拦截:`commit-msg` 三条校验
+## 5. 拦截:一条规则,两个执行点
 
 ```
-① chmod a-w        写下层文件的那一刻就 EACCES    ← 最快,给智能体最直白的信号
-② commit-msg       提交时拒绝                     ← 主拦截,可被 --no-verify 绕过
-③ 投影器隔离       非法提交进不了 layer/*          ← 兜住 ② 被绕过的情况
-④ pre-receive      push 时拒绝                    ← 唯一不可绕的(暂不做,见 §14)
+① chmod a-w              写下层文件的那一刻就 EACCES   ← 最快的反馈,可被 chmod 回来
+② commit-msg             提交时拒绝,信息友好           ← 为体验,--no-verify 可跳过
+③ reference-transaction  ref 更新时检查落进去的内容      ← 为保证,--no-verify 跳不过
+④ pre-receive            push 时同一套检查              ← 服务端,暂不做(见 §14)
 ```
+
+②③ 跑的是**同一条规则、同一份实现**,区别只在执行点:② 在提交对象还没建的时候拒绝,能给出好读的、带替代动作的信息;③ 在 ref 更新那一刻拒绝,谁也跳不过(§11)。
 
 **本版做 ①②③。**
 
-### 为什么是 `commit-msg` 而不是 `pre-commit`
+### 为什么 ② 是 `commit-msg` 而不是 `pre-commit`
 
 钩子顺序是 `pre-commit → prepare-commit-msg → commit-msg`。`pre-commit` 跑的时候**提交信息还不存在**,而这道校验需要同时看到信息(声明的层)和暂存区(实际改动的路径)。只有 `commit-msg` 两样都有(`git diff --cached` 在其中照常可用)。
 
@@ -207,9 +209,9 @@ tree=$(GIT_INDEX_FILE=$idx git write-tree)
 
 **写入面是权威。**已接收的提交以它为准,不会被重建抹掉,工作不会丢。
 
-但权威不等于投影器无条件服从。`--no-verify` 能跳过 `commit-msg`,一个改了事实层文件的提交是可能进入写入面的。这时**投影器停下报错**,把写入面标记为 dirty:既不静默照做(那会把改动写进 `layer/facts`,智能体就真的改到了事实层),也不静默回滚(那会丢工作)。写入面标记 dirty 后,后续提交的投影会继续被拒,`cb check` 报出来,等人处理。
+但权威不等于投影器无条件服从。`reference-transaction` 挡住了经由 git 命令的一切越界(§11),但直接手写 `.git/refs/…` 仍能把越界提交塞上写入面。这时**投影器停下报错**,把写入面标记为 dirty:既不静默照做(那会把改动写进 `layer/facts`,智能体就真的改到了事实层),也不静默回滚(那会丢工作)。写入面标记 dirty 后,后续提交的投影会继续被拒,`cb check` 报出来,等人处理。
 
-> 这是本设计里**唯一**需要人介入的状态。它只可能由 `--no-verify` 或直接写 `.git/` 产生。
+> 这是本设计里**唯一**需要人介入的状态。经由 git 命令走不到这里。
 
 ---
 
@@ -339,17 +341,39 @@ raise SystemExit(commit_msg(sys.argv[1:]))
 
 **凡是移动 ref 而不新建提交内容的操作,`commit-msg` 全看不见。**
 
-解法是 `reference-transaction` 钩子(git 2.28+):它在每一次 ref 更新的 `prepared` 阶段触发,**能否决整个事务**,是唯一覆盖 merge-FF / reset / rebase / cherry-pick / push 的钩子。规则一句话:**`refs/heads/{layer,stack}/*` 的更新,只有 collectbase 自己发起的才放行**(`commit-msg` 校验通过后放一个令牌,`post-commit` 做完全部 `update-ref` 之后收回)。实测 `reset --hard` 与 `merge` 均被拒且写入面纹丝不动,正常 `git commit` 照常通过。
+解法是 `reference-transaction` 钩子(git 2.28+)。它在每一次 ref 更新的 `prepared` 阶段触发、**能否决整个事务**,是唯一覆盖 merge-FF / reset / rebase / cherry-pick / push 的钩子。
 
-于是规矩很清楚:**草稿分支随便用;想把成果拿进来,只有在写入面上正常提交这一条路。**
+关键的转念是**检查内容,不检查来源**——不问"这次更新是谁发起的",只问"落进去的每个提交合不合规":
+
+```
+对写入面的更新 old → new:
+  ① old 必须是 new 的祖先          否则拒绝(rebase / reset / force 改写已有历史)
+  ② old..new 里不能有 merge 节点    否则拒绝
+  ③ old..new 里的每个提交:
+       信息以合法的 [层名] 开头      否则拒绝
+       改动路径不属于别的层          否则拒绝,并指出归谁
+```
+
+没有令牌,没有白名单,不关心你用的是哪条 git 命令。实测七种情况全部符合预期,每次拒绝后写入面纹丝不动;而**一个合规的 `[notes]` 提交被 cherry-pick 过来是放行的**——判据是内容,所以不需要为任何操作开特例。
+
+`layer/*` 与更短的 `stack/*` 同理,规则换成"必须是一次正确的投影 / 重算"。
+
+### 顺带堵上了 `--no-verify`
+
+`--no-verify` 跳过的是 `pre-commit` 和 `commit-msg`,**它不是 `reference-transaction` 的开关**。实测:带 `--no-verify` 提交一个无标签的、或者改了事实层文件的提交,一样被拒。
+
+于是同一条规则有了两个执行点:**`commit-msg` 为体验**(提交对象还没建就拒绝,信息友好,可被跳过),**`reference-transaction` 为保证**(跳不过)。一份实现,两处执行。
+
+### 规矩
+
+草稿分支随便建、随便提交、随便 rebase,collectbase 完全不管。想把成果拿进来,提交本身合规就直接 `cherry-pick`;不合规就取文件重提:
 
 ```sh
-git checkout stack/beliefs
 git checkout scratch -- path/to/file
 git commit -m "[beliefs] …"
 ```
 
-> 令牌是文件不是密钥,能写文件的进程就能伪造——这道闸挡的是"顺手一个 `git reset` 把写入面搞坏",不是对抗,和 §13 其余防线同级。另:`git fetch`/`pull` 对 `stack/*` 的更新也会被拦,单机下正确,多 clone 协作时要重新设计。
+> 剩下的绕法只有"直接手写 `.git/refs/…`"和"把 `core.hooksPath` 拆掉"——那是拆机制,不是绕机制。另:`git fetch`/`pull` 更新 `stack/*` 也走同一套检查,单机下正确,多 clone 协作时派生分支的检查要重新设计。
 
 ---
 
@@ -368,7 +392,9 @@ git commit -m "[beliefs] …"
 
 写在这里是因为它们**不是 bug,是这一版的选择**。
 
-**① 地板是 hook 强制的,不是结构性的。** 写入面的树里就有事实层的文件,智能体够得着。`--no-verify` 能跳过 `commit-msg`,直接写 `.git/` 更是一概看不见。三道防线(`chmod` → `commit-msg` → 投影器隔离)都软,只是把"不小心"变成"故意",并保证故意的那一下扩散不到 `layer/facts`。
+**① 地板不是结构性的,但也不再是纸做的。** 写入面的树里就有事实层的文件,智能体够得着。但要把改动落进去,ref 必须更新,而 `reference-transaction` 会检查落进去的每个提交(§11)——`--no-verify` 跳不过它,`merge` / `reset` / `rebase` / `cherry-pick` 也绕不过。
+
+剩下的绕法只有两条:**直接手写 `.git/refs/…` 或 packed-refs**(不走 git 的 ref 事务),以及**把 `core.hooksPath` 拆掉**。这两条是拆机制,不是绕机制——一个只想省事的智能体不会走到那里,一个铁了心的进程则本来就该用 §13 末尾那两种硬边界来挡。
 
 **② blob 的字节不受分层保护。** 软链是被 git 跟踪的普通路径,受分层规则管;但它指向的字节在 `blob/` 里,是被忽略的,git 全程看不见。一张作为事实的截图可以被悄悄换掉,而 I1–I4 全部照过。
 
@@ -406,7 +432,7 @@ git commit -m "[beliefs] …"
 ## 15. 里程碑
 
 - **M1 骨架** — `cb init` 面向已有仓库的八步(起始点位、既有内容归最底层、建分支、装 hook);`cb check`(I1–I4)。仓库能立起来,不变量能验证。
-- **M2 拦截** — `commit-msg` 三条校验 + `reference-transaction` 令牌协议 + `post-checkout` 的 chmod。地板生效,别的分支也进不来。
+- **M2 拦截** — `reference-transaction` 的三条内容检查(真正的闸)+ `commit-msg` 同规则快速反馈 + `post-checkout` 的 chmod。地板生效,别的分支也进不来。
 - **M3 传播** — `post-commit` 做投影 + 重算,加提交锁。写入面和派生分支自动保持一致。
 - **M4 blob** — `pre-commit` 转换 + 孤儿定点清除 + `cb blob gc`;I5 进 `cb check`。
 - **M5 手感** — 钩子的拒绝信息说人话:告诉它"这个路径归 facts,你要表达异议就在自己层里另写一份并引用它",带具体命令。见 [`works/cli.md`](works/cli.md) §6。
