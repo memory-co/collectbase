@@ -290,16 +290,37 @@ fatal: ref updates aborted by hook
 
 规则:**写入面领先于投影时,拒绝接受新提交**,先把投影补齐(下次 `post-commit` 会按 `Cb-Stack` trailer 为界自动补)。
 
-**④ `120000` 条目的目标必须落在 `blob/` 内。**
+**④ 树条目走白名单,不是逐条打补丁。**
 
-blob 机制假定所有软链都指向 `blob/`,但上层完全可以提交一个指向别处的软链。实测 `project/leak.txt -> /etc/hostname` 顺利进入了仓库:
+blob 机制其实已经定义了"什么能进 git",守卫照着验就行,不必为软链、submodule 各写一条规则:
 
 ```
-120000 blob 48980ad…    project/leak.txt
-→ /etc/hostname
+git 里只允许两种形态:
+  100644 / 100755   内容不是二进制(否则本该先转成 blob 软链)
+  120000            目标是相对路径,且解析后落在 blob/ 之内
+其余一律拒绝:160000(submodule)、任何别的模式
 ```
 
-所以守卫要求:软链目标必须是**相对路径**,且解析后**落在仓库内的 `blob/` 目录下**。其余一律拒绝。
+`pre-commit` 是**转换器**,守卫是**校验器**,两者是同一条规则的两面。
+
+这个白名单堵的洞比看起来大。`--no-verify` 跳过 `pre-commit`,blobify 就不发生;`cherry-pick` 和 `rebase` 也不跑 `pre-commit`。在只查标签和路径归属的旧版守卫下,**一个裸的 2 MB 二进制会直接进写入面**——实测确实进去了。加上白名单之后:
+
+```
+✗ project/raw.png 是二进制却直接进了 git —— 应该先转成 blob 软链
+✗ project/leak.txt 是绝对路径软链 → /etc/hostname
+✗ project/leak2.txt 的软链逃出 blob/ → ../../../etc/passwd
+✗ vendor/sub 是 submodule(160000),不支持
+```
+
+而纯文本和合法的 blob 软链照常放行。
+
+> **判据必须只有一份实现。** 如果转换器说"这是文本,不转"而校验器说"这是二进制,拒绝",这个提交就永远进不去——死锁。好在 `file` 能读 stdin,守卫拿到 blob OID 也能用完全相同的判断:
+>
+> ```sh
+> git cat-file blob "$oid" | file -b --mime-encoding -
+> ```
+>
+> 超大文本的阈值(blob-store §1)同理,必须两边共用。
 
 **⑤ 路径比对要大小写折叠。**
 
@@ -409,7 +430,6 @@ $ cb check
 ## 7. 待定
 
 - **多 clone 协作。** `fetch`/`pull` 对 `stack/*` 的更新走同一套检查,单机下正确;多 clone 时派生分支的检查要重新设计(远端的 `layer/*` 未必和本地一致),多半要和服务端 `pre-receive`(主设计 §14)一起考虑。
-- **submodule(`160000` 条目)完全没规定。** 归属怎么算、算不算二进制、`cb check` 怎么验,都还没想。
 - **投影的并发锁。** `post-commit` 里的投影 + 重算要串行,锁放哪、等多久、超时怎么办。
 - **`layers` 顶部追加一层时写入面上移**,用户/智能体正停在旧写入面上。怎么提示、要不要自动 checkout。
 - **多仓库共享 blob 库。**

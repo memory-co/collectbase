@@ -257,6 +257,20 @@ git ls-tree HEAD project/log/screen.png
 - **孤儿对象**:`git add` 那一刻原始字节已写进 `.git/objects`。钩子在替换前用 `git rev-parse :<path>` 记下 OID,`post-commit` 定点删掉那一个松散对象文件即可(实测 7.9 M → 236 K,`git fsck` 无 error,reflog 完好)。
 - **GC 活性由历史决定**,不是工作区:遍历 `git rev-list --all` 所有树里的 `120000` 条目才是活集。否则回到旧提交时旧软链就断了。
 
+### 白名单:git 里只允许两种形态
+
+blob 机制反过来定义了"什么能进 git",这份白名单同时是 `reference-transaction` 的校验规则:
+
+```
+100644 / 100755   内容不是二进制(否则本该先转成 blob 软链)
+120000            目标是相对路径,且解析后落在 blob/ 之内
+其余一律拒绝      160000(submodule)、任何别的模式
+```
+
+`pre-commit` 是转换器,守卫是校验器,**同一条规则的两面**。这一点很要紧:`--no-verify` / `cherry-pick` / `rebase` 都不跑 `pre-commit`,没有守卫这一侧,裸二进制就能直接进写入面(实测确实进去了)。
+
+两者的二进制判据**必须是同一份实现**,否则转换器说"是文本不转"、校验器说"是二进制拒绝",这个提交就永远进不去。`file` 能读 stdin,所以守卫拿 blob OID 也能用完全相同的判断:`git cat-file blob <oid> | file -b --mime-encoding -`。
+
 > 三条少一条就漏的实现要点(`--diff-filter` 必须含 `T`、必须改工作区、部分提交要 `post-commit` 补主索引)见 [`works/blob-store.md`](works/blob-store.md) §2。**这三条都是实测撞出来的,不是推演。**
 
 ---
@@ -355,12 +369,12 @@ raise SystemExit(commit_msg(sys.argv[1:]))
   ④ old..new 里的每个提交:
        信息以合法的 [层名] 开头      层名按 old:layers 判定,不是 new
        改动路径不属于别的层          折叠大小写后比对
-       120000 条目指向 blob/ 之内    相对路径,不逃逸
+       改动的每个树条目走白名单      见 §8
 ```
 
 没有令牌,没有白名单,不关心你用的是哪条 git 命令。实测七种情况全部符合预期,每次拒绝后写入面纹丝不动;而**一个合规的 `[notes]` 提交被 cherry-pick 过来是放行的**——判据是内容,所以不需要为任何操作开特例。
 
-**三条容易漏的**(都是实测撞出来的):`git pack-refs` 把 loose ref 迁进 `packed-refs` 时呈现为一次删除事务,不放行就 `fatal: failed to run pack-refs`,`git gc` 直接坏掉;`layers` 若从 `new` 读,一个提交就能**同时加层并用这层给自己发证**(实测得逞),必须从 `old` 读,于是加层天然变成两次提交;软链目标不校验的话,`project/leak.txt -> /etc/hostname` 能直接进仓库,而 blob 机制假定所有 `120000` 都指向 `blob/`。
+**四条容易漏的**(都是实测撞出来的):`git pack-refs` 把 loose ref 迁进 `packed-refs` 时呈现为一次删除事务,不放行就 `fatal: failed to run pack-refs`,`git gc` 直接坏掉;`layers` 若从 `new` 读,一个提交就能**同时加层并用这层给自己发证**(实测得逞),必须从 `old` 读,于是加层天然变成两次提交;树条目不走白名单的话,`--no-verify` 跳过 `pre-commit` 就不会 blobify,**一个裸的 2 MB 二进制会直接进写入面**(实测确实进去了),`project/leak.txt -> /etc/hostname` 这样的逃逸软链也照收不误;`cherry-pick` 和 `rebase` 同样不跑 `pre-commit`。
 
 另外:**写入面领先于投影时拒收新提交**——守卫靠 `layer/*` 的树判归属,投影没跑完时那个判据是失真的。
 
@@ -388,6 +402,7 @@ git commit -m "[beliefs] …"
 ## 12. 边界(v2 不做什么)
 
 - **不管内容格式。** 层里放什么文件、什么结构、怎么互相引用,是使用者的事。工具只管路径归属、分支拓扑、以及二进制的**存放位置**(内容仍然不管)。
+- **不支持 submodule。** `160000` 条目不在 §8 的白名单里,直接拒绝。
 - **不做采集。** v1 的 worker 全部作废。事实怎么进事实层——脚本、rsync、人手动 cp——都行。
 - **不推给任何下游。** 没有 sink,没有 memory system,没有 HTTP。
 - **不做联合挂载 / FUSE。** 视图由 `git checkout` 提供,足够了。
