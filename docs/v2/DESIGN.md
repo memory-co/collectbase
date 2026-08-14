@@ -12,6 +12,7 @@
 
 - [`works/branch-topology.md`](works/branch-topology.md) — **分支怎么组织**。单写入面、`[层名]` 声明、投影与重算、全仓库零 merge 节点。附两个被否方案及其实测。
 - [`works/blob-store.md`](works/blob-store.md) — **二进制怎么存**。`blob/` 外置 + 软链、`file --mime-encoding` 判据、钩子改写索引在四种提交方式下的行为、孤儿对象定点清除。
+- [`works/cli.md`](works/cli.md) — **`cb` 命令行**。命令全表与输出样例、hook 入口、退出码、锁,以及"错误信息是智能体的 UI"这条功能需求。
 
 ---
 
@@ -315,25 +316,13 @@ git log --oneline stack/beliefs
 
 ---
 
-## 10. CLI 表面
+## 10. CLI
 
-刻意小。Git 是接口,`cb` 不包装 Git 的日常动词。
+刻意小。Git 是接口,`cb` 只补 Git 补不了的四件事:**立起来**(`init`)、**维持不变量**(`sync` / `check` / `doctor`)、**回答归属**(`owner` / `status` / `layers`)、**管 blob**(`blob …`)。
 
-| 命令 | 干什么 |
-|---|---|
-| `cb init --layers a,b,c` | 建分支拓扑、写配置、装 hook |
-| `cb sync` | 投影 + 重算(hook 调它,也可手动) |
-| `cb check` | 校验 I1–I5,列出违反项 |
-| `cb owner <path>` | 这个路径归哪层 |
-| `cb status` | `git status` 的分层版:改动按层分组,越界的标红 |
-| `cb layers` | 列出层、分支、各层文件数、当前在哪条分支 |
-| `cb blob verify [--missing]` | 重新哈希比对 / 列出缺失的 blob |
-| `cb blob gc [--dedup]` | 按全历史活集清理;`--dedup` 跨天硬链接合并 |
-| `cb blob push / pull <remote>` | 按活集同步 blob 库 |
-| `cb doctor` | 报告缺失的 blob、坏掉的不变量,并给出恢复命令 |
-| `cb hook <name>` | hook 入口,不给人直接用 |
+**没有** `cb commit` / `cb checkout` / `cb log` / `cb diff`。那些就是 Git 的动词。
 
-**没有** `cb commit` / `cb checkout` / `cb log` / `cb diff`。那些就是 `git commit` / `git checkout` / …。多包一层只会让人搞不清哪个是真的。
+> 命令全表、输出样例、hook 入口、退出码与锁,见 [`works/cli.md`](works/cli.md)。其中 §4「错误信息是智能体的 UI」是功能需求而非文档规范——智能体和 `cb` 的接触面几乎只有 hook 的拒绝信息,那几行字是它唯一能学到规矩的地方。
 
 ---
 
