@@ -70,32 +70,60 @@ force_out  = ["**/*.min.js"]      # 即便判成二进制也留在 git
 
 ---
 
-## 2. 执行点:git 没有 `pre-add` hook
+## 2. 执行点:在 `pre-commit` 里改写索引
 
-这是个硬约束,得先说清楚:**git 没有任何在 `git add` 时触发的钩子。** 所以"add 的时候就转换"没法用钩子实现。三个可选执行点:
+**git 没有任何在 `git add` 时触发的钩子**,clean 过滤器也不行(过滤器只能改内容,改不了文件模式,变不出软链)。但 `git commit` 完全在我们掌控里,所以做法是:
 
-| 执行点 | 可行 | 代价 |
+> **`pre-commit` 里把原本 add 进去的内容踢掉,换成软链,再让 git 提交。**
+
+```sh
+# pre-commit(要点见下,少一条就有一种提交方式会漏)
+{ git diff --cached --name-only --diff-filter=ACMRT
+  git diff        --name-only --diff-filter=ACMRT ; } | sort -u |
+while read -r f; do
+  [ -L "$f" ] && continue                                   # 已是软链,跳过
+  [ "$(file -b --mime-encoding "$f")" = binary ] || continue
+  …移进 blob,原地建相对软链…
+  git rm --cached "$f"; git add "$f"                        # 踢掉原条目,换成软链
+  echo "$f" >> .git/cb-converted                            # 交给 post-commit
+done
+```
+
+**四种提交方式全部实测通过**(实验 6):
+
+| 提交方式 | 钩子看到的 `GIT_INDEX_FILE` | 结果 |
 |---|---|---|
-| `git add` 时 | ❌ **不存在这个钩子** | — |
-| clean 过滤器(`.gitattributes`) | ❌ | 过滤器只能改内容,改不了文件模式,变不出软链 |
-| **`pre-commit`** | ✅ | `git add` 已经把原始字节写进对象库了,见下 |
-| **watcher(`cb watch`)** | ✅ | 需要一个常驻进程 |
+| `git commit`(先 `git add`) | `.git/index` | ✅ 提交里是软链,87 字节 |
+| `git commit -a` | `.git/index.lock` | ✅ 软链 |
+| `git commit -- <path>`(部分提交) | `.git/next-index-*.lock`(临时索引) | ✅ 软链 |
+| `git commit --amend` | `.git/index` | ✅ 软链 |
 
-### 推荐:watcher 主路径,`pre-commit` 兜底
+全仓库审计(遍历 `git rev-list --all` 的每一棵树,找有没有非 `120000` 模式的大对象):**干净,没有任何原始二进制进过任何提交。**
 
-**watcher** 在文件落地的那一刻就转换,于是 `git add` 从头到尾只见得到软链,对象库里干干净净。harness 场景下这很自然——它本来就要拉起一个长期进程。
+### 三条少一条就漏的要点
 
-**`pre-commit`** 是兜底:漏网的当场转换(移进 blob、建软链、重新 `git add`),提交里进去的是软链。功能上完全正确,但有个残留:
+1. **`--diff-filter` 必须包含 `T`。** 软链被换回普通文件,git 记的是 **T(类型变更)**,不是 M。而"替换一个媒体文件"恰恰**每次都走这条**——第一次是 A,之后全是 T。我第一版脚本用了 `ACM`,`git commit -a` 就直接漏了一个 2 MB 的原文件进提交,而且表面上钩子"正常执行、处理了 0 个"。这是本篇最阴的一个坑。
 
-> `git add project/big.iso` 已经在 `.git/objects` 里写了一个 8 MB 的完整对象。之后就算把索引项换成软链,那个对象仍然存在,只是变成了不可达对象。
+2. **必须改工作区,不能只改索引。** `git commit -a` 的暂存动作发生在钩子**之后**,钩子改的索引条目会被随后的暂存覆盖。所以钩子要把工作区里的真文件换成软链——之后 git 无论怎么暂存,拿到的都是软链。
 
-实测:add 8 MB 文件后 `.git` = **7.9 M**;换成软链提交后仍是 **7.9 M**;`git reflog expire --expire-unreachable=now --all && git gc --prune=now` 之后回到 **168 K**。
+3. **部分提交要用 `post-commit` 补主索引。** `git commit -- <path>` 时钩子拿到的是临时索引(`next-index-*.lock`),改动对本次提交有效,但**主索引里其他已暂存路径仍留着转换前的条目**。`post-commit` 里对转换过的路径重新 `git add` 一遍即可。实测:紧接着提交剩下那个文件,进去的仍然是软链。
 
-所以孤儿对象是清得掉的,但那条命令**会连带清掉所有不可达的 reflog 记录**,`git reset --hard` 之后的救命稻草就没了。因此:
+### 代价:孤儿对象
+
+`git add project/big.iso` 那一刻,原始字节已经写进 `.git/objects` 了。钩子换掉索引条目只是让它变成**不可达对象**,并不会删掉它。
+
+实测:全程 add 了约 10 MB 二进制,`.git` = **10 M**;`git reflog expire --expire-unreachable=now --all && git gc --prune=now` 之后回到 **176 K**。
+
+清得掉,但那条命令**会连带清掉所有不可达的 reflog 记录**,`git reset --hard` 之后的救命稻草就没了。所以:
 
 - 默认**不主动清**,交给 git 正常的 gc(不可达对象两周后过期)。临时占点磁盘,安全。
-- 提供 `cb blob reclaim` 做立即回收,并在命令输出里明写 reflog 的代价。
-- 真在意的话,用 watcher,根本不产生孤儿。
+- `cb blob reclaim` 做立即回收,命令输出里明写 reflog 的代价。
+
+### 可选:watcher 主路径
+
+`cb watch` 在文件落地那一刻就转换,`git add` 从头到尾只见得到软链,**根本不产生孤儿对象**。harness 场景下很自然——它本来就要拉起长期进程。
+
+但它不是必需的:`pre-commit` 这条路已经被验证在四种提交方式下都正确。watcher 是省磁盘的优化,不是正确性的前提。
 
 ---
 
@@ -136,23 +164,13 @@ done | 解析出 blob 路径 | sort -u                # 这就是活集
 
 ---
 
-## 5. `blob/` 本身应该是一条软链
+## 5. `git clean -xdf` 会删光 blob 库
 
-`git clean -xdf` 会删掉被忽略的文件——**包括整个 blob 库**。实测对照:
+实测确认:`blob/` 是被忽略的目录,`git clean -xdf` 会把它和里面的文件全部删掉。
 
-| `blob` 是什么 | `git clean -xdf` 之后 |
-|---|---|
-| 真目录 | ❌ **目录和里面的文件全没了** |
-| 指向仓库外存储的软链 | ✅ 软链被删,**存储完好无损**(文件还在) |
+**不为此改设计。**放进 `.gitignore` 就必然有这个性质,躲不掉;真要躲只能把库挪出工作区,那就没有"媒体库"可浏览了。**恢复靠 collectbase 自己的同步机制**——库在别处有副本,`cb blob pull` 拉回来即可(§7)。
 
-所以默认形态是:
-
-```
-blob -> ~/.collectbase/store/<repo-id>/
-.gitignore:  blob
-```
-
-`git clean -xdf` 顶多删掉那条软链,`cb doctor` 一条命令重建。库在仓库之外,顺带也让"多个 clone 共享同一个库"和"库单独 rsync"变得自然。
+`cb doctor` 应当检测到库为空或大面积缺失,并直接提示恢复命令,而不是让人对着一堆断链猜发生了什么。
 
 ---
 
@@ -199,17 +217,22 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 
 | 命令 | 干什么 |
 |---|---|
-| `cb watch` | 常驻,文件落地即转换(推荐路径) |
 | `cb blob verify [--missing]` | 重新哈希比对 / 列出缺失的 blob |
 | `cb blob gc [--dedup]` | 按全历史活集清理;`--dedup` 跨天硬链接合并 |
+| `cb blob push / pull <remote>` | 按活集同步库;`git clean -xdf` 之后靠它恢复 |
 | `cb blob reclaim` | 立即回收误 add 产生的孤儿对象(会清 reflog,命令自己会警告) |
-| `cb doctor` | 重建 `blob` 软链、报告缺失 |
+| `cb watch` | 可选常驻,文件落地即转换,不产生孤儿对象 |
+| `cb doctor` | 报告缺失的 blob,并给出恢复命令 |
 
-`pre-commit` 里的转换不给单独命令,它是钩子内部行为。
+`pre-commit` / `post-commit` 里的转换不给单独命令,是钩子内部行为。
 
 ---
 
 ## 9. 实测汇总
+
+脚本:[`exp-blob.sh`](exp-blob.sh)(布局与体积)、[`exp-hook.sh`](exp-hook.sh)(钩子改写索引)。
+
+**布局与体积**
 
 | 验证项 | 结果 |
 |---|---|
@@ -219,17 +242,27 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 | 文件修改 → 新 blob,旧 blob 保留 | ✅ 两个 blob 并存 |
 | 回到旧提交,旧软链能否解析 | ✅ 可解析,5,000,000 字节 |
 | 深目录里的相对软链 | ✅ `../../blob/…` 正确 |
-| 误 `git add` 8 MB 原文件 | `.git` 涨到 **7.9 M**,换软链提交后仍是 7.9 M |
-| `reflog expire + gc --prune=now` | ✅ 回到 **168 K**,孤儿对象清除 |
 | `git clone` | ⚠️ **188 K,断链**——字节不随 clone 传输 |
-| `git clean -xdf`(blob 为真目录) | ❌ **库被删光** |
-| `git clean -xdf`(blob 为外部软链) | ✅ 只删软链,库完好 |
+| `git clean -xdf` | ❌ **库被删光**(接受,靠 `cb blob pull` 恢复) |
+
+**钩子改写索引**
+
+| 提交方式 | 结果 |
+|---|---|
+| `git commit` | ✅ 软链,87 字节 |
+| `git commit -a` | ✅ 软链(前提:`--diff-filter` 含 `T`,且钩子改工作区) |
+| `git commit -- <path>` | ✅ 软链(主索引由 `post-commit` 补) |
+| `git commit --amend` | ✅ 软链 |
+| 全历史审计:有无非软链的大对象进过提交 | ✅ **无** |
+| `--diff-filter=ACM`(漏掉 `T`) | ❌ `commit -a` 漏进 2 MB 原文件,且钩子表面正常 |
+| 误 add 累积的孤儿对象 | `.git` **10 M** → `reflog expire + gc --prune=now` → **176 K** |
 
 ---
 
 ## 10. 待定
 
-- **watcher 的形态。**inotify?轮询?和 `cb sync` 是同一个进程还是两个?写到一半的文件(还在被写入)不能立刻转换,需要静默期判断。
+- **写到一半的文件。**钩子在 `pre-commit` 触发时文件通常已经写完,风险低;但 watcher 那条路必须判静默期,不能对还在被写入的文件下手。
+- **watcher 的形态(仅当要省孤儿对象时)。**inotify 还是轮询?和 `cb sync` 同进程还是两个?
 - **软链在 Windows 上。**需要开发者模式或管理员权限。当前只面向 Linux harness,但这条会挡住跨平台。
 - **`force_in` / `force_out` 的 glob 语义**是否复用 `.gitignore` 的匹配规则。
 - **blob 的日期与"事实发生时间"的关系。**现在用的是添加时刻;采集三个月前的会话时,截图会落在今天的日期下。要不要允许 worker 声明一个逻辑日期?
