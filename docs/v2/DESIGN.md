@@ -12,7 +12,7 @@
 
 - [`works/branch-topology.md`](works/branch-topology.md) — **分支怎么组织**。单写入面、`[层名]` 声明、投影与重算、全仓库零 merge 节点。附两个被否方案及其实测。
 - [`works/blob-store.md`](works/blob-store.md) — **二进制怎么存**。`blob/` 外置 + 软链、`file --mime-encoding` 判据、钩子改写索引在四种提交方式下的行为、孤儿对象定点清除。
-- [`works/cli.md`](works/cli.md) — **`cb` 命令行**。命令全表与输出样例、hook 入口、退出码、锁,以及"错误信息是智能体的 UI"这条功能需求。
+- [`works/cli.md`](works/cli.md) — **CLI 与 hook**。为什么 `cb` 只剩三条命令、四个 hook 各干什么、锁与退出码,以及"错误信息是智能体的 UI"这条功能需求。
 
 ---
 
@@ -27,7 +27,7 @@ git checkout layer/notes     →   工作树 = 只有 notes 自己的文件     
 git checkout layer/facts     →   工作树 = 只有事实                   ← 只读视图
 ```
 
-日常动作全是 Git 的。`cb` 只出现在三个地方:`init`、诊断、和 hook 内部。
+日常动作全是 Git 的。`cb` 只有三条命令:`init`、`hook`(git 自己调)、`check`。
 
 ---
 
@@ -207,7 +207,7 @@ tree=$(GIT_INDEX_FILE=$idx git write-tree)
 
 **写入面是权威。**已接收的提交以它为准,不会被重建抹掉,工作不会丢。
 
-但权威不等于投影器无条件服从。`--no-verify` 能跳过 `commit-msg`,一个改了事实层文件的提交是可能进入写入面的。这时**投影器停下报错**,把写入面标记为 dirty:既不静默照做(那会把改动写进 `layer/facts`,智能体就真的改到了事实层),也不静默回滚(那会丢工作)。`cb check` 报 divergence,`cb sync` 拒绝继续,等人处理。
+但权威不等于投影器无条件服从。`--no-verify` 能跳过 `commit-msg`,一个改了事实层文件的提交是可能进入写入面的。这时**投影器停下报错**,把写入面标记为 dirty:既不静默照做(那会把改动写进 `layer/facts`,智能体就真的改到了事实层),也不静默回滚(那会丢工作)。写入面标记 dirty 后,后续提交的投影会继续被拒,`cb check` 报出来,等人处理。
 
 > 这是本设计里**唯一**需要人介入的状态。它只可能由 `--no-verify` 或直接写 `.git/` 产生。
 
@@ -316,13 +316,19 @@ git log --oneline stack/beliefs
 
 ---
 
-## 10. CLI
+## 10. CLI:三条命令
 
-刻意小。Git 是接口,`cb` 只补 Git 补不了的四件事:**立起来**(`init`)、**维持不变量**(`sync` / `check` / `doctor`)、**回答归属**(`owner` / `status` / `layers`)、**管 blob**(`blob …`)。
+**逻辑全在 git hook 里**,`cb` 只剩三条:
 
-**没有** `cb commit` / `cb checkout` / `cb log` / `cb diff`。那些就是 Git 的动词。
+```
+cb init --layers a,b,c      建分支拓扑、写配置、装 hook          人跑,一次
+cb hook <name>              hook 入口                          git 调,不给人用
+cb check                    校验不变量(尤其 I5 blob 完整性)    人跑 / CI
+```
 
-> 命令全表、输出样例、hook 入口、退出码与锁,见 [`works/cli.md`](works/cli.md)。其中 §4「错误信息是智能体的 UI」是功能需求而非文档规范——智能体和 `cb` 的接触面几乎只有 hook 的拒绝信息,那几行字是它唯一能学到规矩的地方。
+凡是"读"的,git 已经有了(`git status` / `git log` / `git branch --list 'layer/*'`;甚至"这个路径归哪层"都不用问——下层是 444,`ls -l` 就是答案)。凡是"写"的,应该由钩子自动发生,而不是等人想起来敲命令。留下的三条恰好是 git 覆盖不到的:初始化、钩子本体、以及 git 看不见的 blob。
+
+> 四个 hook 的职责、越界时的停止规则、锁、退出码,见 [`works/cli.md`](works/cli.md)。其中「错误信息是智能体的 UI」是功能需求而非文档规范——智能体和 collectbase 的接触面几乎只有钩子的拒绝信息,那几行字是它唯一能学到规矩的地方。
 
 ---
 
@@ -345,13 +351,13 @@ git log --oneline stack/beliefs
 
 **② blob 的字节不受分层保护。** 软链是被 git 跟踪的普通路径,受分层规则管;但它指向的字节在 `blob/` 里,是被忽略的,git 全程看不见。一张作为事实的截图可以被悄悄换掉,而 I1–I4 全部照过。
 
-好在内容寻址在这里回本:sha256 就在路径里,**重新哈希一比就知道**。所以 `cb blob verify`(即 I5)不是可选功能,是必需品。
+好在内容寻址在这里回本:sha256 就在路径里,**重新哈希一比就知道**。所以 `cb check` 的 I5 不是可选功能,是必需品。
 
 **③ 写入必须串行化。** 只有一条写入面,而同一个分支不能在两个 worktree 里同时 checkout。采集脚本在后台写事实、智能体同时干活,两者抢同一条分支,需要 `cb` 加一把提交锁。这是单写入面换来一致性的直接代价,没有免费的解。
 
 **④ 规则散在每个 clone 里。** `core.hooksPath` 缓解了大部分,但 `git config` 那一步仍是每个 clone 一次。
 
-**⑤ 仓库不再自足。** `git clone` 只带走软链不带走字节(实测 clone 出来 188 KB、断链)。`git clean -xdf` 会删光 `blob/`。两者都靠 `cb blob pull` 恢复,`cb doctor` 负责把话说清楚,而不是让人对着一堆断链猜。
+**⑤ 仓库不再自足。** `git clone` 只带走软链不带走字节(实测 clone 出来 188 KB、断链)。`git clean -xdf` 会删光 `blob/`。两者都靠把库从别处 rsync 回来恢复;`cb check` 负责把话说清楚,而不是让人对着一堆断链猜。
 
 ### 要硬边界,只有两条路,都在 git 之外
 
@@ -378,11 +384,11 @@ git log --oneline stack/beliefs
 
 ## 14. 里程碑
 
-- **M1 骨架** — `cb init` 建 `layer/*` + `stack/*`、写 `collectbase.toml`、装 hook;归属推导;`cb check`(I1–I4);`cb owner`。仓库能立起来,不变量能验证。
+- **M1 骨架** — `cb init` 建 `layer/*` + `stack/*`、写 `collectbase.toml`、装 hook;归属推导;`cb check`(I1–I4)。仓库能立起来,不变量能验证。
 - **M2 拦截** — `commit-msg` 三条校验 + `post-checkout` 的 chmod。地板生效。
-- **M3 传播** — `post-commit` → `cb sync`(投影 + 重算)+ 提交锁。写入面和派生分支自动保持一致。
-- **M4 blob** — `pre-commit` 转换 + 孤儿定点清除 + `cb blob verify/gc/push/pull`;I5 进 `cb check`。
-- **M5 手感** — `cb status` / `cb layers` / `cb doctor`,错误信息说人话(拒绝时告诉它"这个路径归 facts,你要表达异议就在自己层里另写一份并引用它")。
+- **M3 传播** — `post-commit` 做投影 + 重算,加提交锁。写入面和派生分支自动保持一致。
+- **M4 blob** — `pre-commit` 转换 + 孤儿定点清除 + `cb blob gc`;I5 进 `cb check`。
+- **M5 手感** — 钩子的拒绝信息说人话:告诉它"这个路径归 facts,你要表达异议就在自己层里另写一份并引用它",带具体命令。见 [`works/cli.md`](works/cli.md) §5。
 - **M6(之后)** — 服务端 `pre-receive` + ref 级授权,把 §12 ① 补上。
 
 ---

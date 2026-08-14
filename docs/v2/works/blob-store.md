@@ -149,11 +149,9 @@ add 后索引:        100644 1e0702c2…  f.png
 
 先 `git rm --cached` 反而会报 `staged content different from both the file and the HEAD`。钩子里一条 `git add` 就够。
 
-### 可选:watcher 主路径
+### 不做 watcher
 
-`cb watch` 在文件落地那一刻就转换,`git add` 从头到尾只见得到软链,**根本不产生孤儿对象**。harness 场景下很自然——它本来就要拉起长期进程。
-
-但它不是必需的:`pre-commit` 这条路已经被验证在四种提交方式下都正确。watcher 是省磁盘的优化,不是正确性的前提。
+一个常驻进程在文件落地那一刻就转换,`git add` 从头到尾只见得到软链,根本不产生孤儿对象。听起来更干净,但 `pre-commit` 这条路已被实测覆盖四种提交方式,而孤儿对象又能定点清除——watcher 省的只是那一瞬间的磁盘占用。**不值一个常驻进程**,不做。
 
 ---
 
@@ -198,9 +196,9 @@ done | 解析出 blob 路径 | sort -u                # 这就是活集
 
 实测确认:`blob/` 是被忽略的目录,`git clean -xdf` 会把它和里面的文件全部删掉。
 
-**不为此改设计。**放进 `.gitignore` 就必然有这个性质,躲不掉;真要躲只能把库挪出工作区,那就没有"媒体库"可浏览了。**恢复靠 collectbase 自己的同步机制**——库在别处有副本,`cb blob pull` 拉回来即可(§7)。
+**不为此改设计。**放进 `.gitignore` 就必然有这个性质,躲不掉;真要躲只能把库挪出工作区,那就没有"媒体库"可浏览了。**恢复靠 collectbase 自己的同步机制**——库在别处有副本,`rsync -a host:path/blob/ blob/` 拉回来即可(§7)。
 
-`cb doctor` 应当检测到库为空或大面积缺失,并直接提示恢复命令,而不是让人对着一堆断链猜发生了什么。
+`cb check` 的 I5 会检测到库为空或大面积缺失,并直接给出那条 rsync,而不是让人对着一堆断链猜发生了什么。
 
 ---
 
@@ -222,10 +220,10 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 三道防护,和主设计 §8 的思路一致:
 
 1. **blob 落库即 `chmod 444`。** 挡普通写。实测已在流程里。
-2. **`cb blob verify`:重新哈希,和路径里的 sha256 比对。** 内容寻址在这里回本了——篡改是**可检测**的,这是普通 gitignore 文件没有的性质。应该进 `cb check`,并且在事实层的 blob 上默认开启。
+2. **重新哈希,和路径里的 sha256 比对(即 `cb check` 的 I5)。** 内容寻址在这里回本了——篡改是**可检测**的,这是普通 gitignore 文件没有的性质。这是必需项,不是诊断工具。
 3. **uid 边界。** blob 文件属于 uid A、模式 444,智能体跑 uid B,`chmod` 是内核拒绝。目录加 sticky 位它也删不掉。这是唯一硬的一道,和分支拓扑那边推荐的方案是同一条。
 
-> 一句话:**软链的完整性由 git 保证,blob 的完整性由 `cb blob verify` 保证。** 两者缺一,事实层就不完整。
+> 一句话:**软链的完整性由 git 保证,blob 的完整性由 `cb check` 的 I5 保证。** 两者缺一,事实层就不完整。
 
 ---
 
@@ -235,9 +233,8 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 
 这是把二进制移出 git 的必然结果,不是实现缺陷。相应地:
 
-- `cb blob push <remote>` / `cb blob pull <remote>` —— rsync 一层薄封装,按活集传输。
-- `cb blob verify --missing` —— 列出当前分支引用了但本地不存在的 blob。
-- clone 之后 `cb doctor` 应当明确报告"缺 N 个 blob",而不是让人对着一堆断链猜。
+- 传输就是 `rsync -a blob/ host:path/blob/`,不给命令。"按活集传输"是伪需求——整个库 rsync 一遍更简单,增量由 rsync 自己算。
+- clone 之后 `cb check` 明确报告"缺 N 个 blob"并给出那条 rsync,而不是让人对着一堆断链猜。
 
 对 collectbase 的主场景(harness 跑在自己机器上,仓库和库都在本地)影响不大;要跨机器共享时,库必须和仓库一起搬,这一点得写进主设计的部署说明。
 
@@ -247,14 +244,10 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 
 | 命令 | 干什么 |
 |---|---|
-| `cb blob verify [--missing]` | 重新哈希比对 / 列出缺失的 blob |
-| `cb blob gc [--dedup]` | 按全历史活集清理;`--dedup` 跨天硬链接合并 |
-| `cb blob push / pull <remote>` | 按活集同步库;`git clean -xdf` 之后靠它恢复 |
-| `cb blob reclaim` | 兜底回收孤儿对象(`git prune --expire=now`,先 `-n` 打印清单) |
-| `cb watch` | 可选常驻,文件落地即转换,不产生孤儿对象 |
-| `cb doctor` | 报告缺失的 blob,并给出恢复命令 |
+| `cb check`(I5) | 重新哈希比对,列出缺失与篡改,并给出恢复用的 rsync |
+| `cb blob gc [--dedup] [-n]` | 按全历史活集清理;`--dedup` 跨天硬链接合并 |
 
-`pre-commit` / `post-commit` 里的转换不给单独命令,是钩子内部行为。
+就这两条。转换是钩子内部行为,不给命令;传输就是 `rsync -a blob/ host:path/blob/`;兜底回收孤儿是 `git prune --expire=now`。**凡是 git 或 rsync 已经能做的,不包。** 完整理由见 [`cli.md`](cli.md) §1。
 
 ---
 
@@ -273,7 +266,7 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 | 回到旧提交,旧软链能否解析 | ✅ 可解析,5,000,000 字节 |
 | 深目录里的相对软链 | ✅ `../../blob/…` 正确 |
 | `git clone` | ⚠️ **188 K,断链**——字节不随 clone 传输 |
-| `git clean -xdf` | ❌ **库被删光**(接受,靠 `cb blob pull` 恢复) |
+| `git clean -xdf` | ❌ **库被删光**(接受,靠 rsync 恢复) |
 
 **钩子改写索引**
 
@@ -295,7 +288,7 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 ## 10. 待定
 
 - **写到一半的文件。**钩子在 `pre-commit` 触发时文件通常已经写完,风险低;但 watcher 那条路必须判静默期,不能对还在被写入的文件下手。
-- **watcher 的形态(仅当要省孤儿对象时)。**inotify 还是轮询?和 `cb sync` 同进程还是两个?
+
 - **软链在 Windows 上。**需要开发者模式或管理员权限。当前只面向 Linux harness,但这条会挡住跨平台。
 - **`force_in` / `force_out` 的 glob 语义**是否复用 `.gitignore` 的匹配规则。
 - **blob 的日期与"事实发生时间"的关系。**现在用的是添加时刻;采集三个月前的会话时,截图会落在今天的日期下。要不要允许 worker 声明一个逻辑日期?
@@ -308,6 +301,6 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 - **§7 配置**:`collectbase.toml` 增加 `[blob]` 段(阈值、force_in / force_out)。
 - **§9 CLI**:并入 §8 的五条命令。
 - **§10 边界**:"不管内容格式"要加一句例外——二进制的**存放位置**归 collectbase 管,内容仍然不管。
-- **§11 里程碑**:blob 库是独立的一条线,建议排在 M3 之后、M4 之前;`cb blob verify` 要和 `cb check` 一起进 M4。
-- **§12 弱点**:补上 §6 那个洞——分层保证只覆盖软链,不覆盖字节;`cb blob verify` 是必需品不是可选项。
+- **§14 里程碑**:blob 是独立的一条线,排在 M4;I5 和 `cb check` 一起进。
+- **§12 弱点**:补上 §6 那个洞——分层保证只覆盖软链,不覆盖字节;`cb check` 的 I5 是必需品不是可选项。
 - **部署说明**(主设计目前没有这一节):clone 不带 blob,跨机器要单独搬库。
