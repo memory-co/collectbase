@@ -59,7 +59,7 @@ git cat-file -s HEAD:project/log/screen.png
 1. **`inode/x-empty` 留下。** 空文件的 encoding 也报 `binary`,但空文件进 blob 库毫无意义。
 2. **超大文本兜底(可配,默认 50 MB)。** encoding 判据管不了"一个 200 MB 的纯文本日志"。这条有张力——大文本恰恰是最该留在 git 里的东西(可 diff、可 grep),所以阈值应该定得高,只当病态情况的保险丝,而不是常规路径。
 
-另外允许在 `collectbase.toml` 里用 glob 强制覆盖两个方向:
+另外允许在 `.collectbase/config.toml` 里用 glob 强制覆盖两个方向(锚定文件 `layers` 保持最小,只放层名):
 
 ```toml
 [blob]
@@ -298,7 +298,7 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 
 ## 11. 回写主设计的清单
 
-- **§7 配置**:`collectbase.toml` 增加 `[blob]` 段(阈值、force_in / force_out)。
+- **§7 锚定**:blob 的可调项放 `.collectbase/config.toml` 的 `[blob]` 段,不进 `layers`。
 - **§9 CLI**:并入 §8 的五条命令。
 - **§10 边界**:"不管内容格式"要加一句例外——二进制的**存放位置**归 collectbase 管,内容仍然不管。
 - **§14 里程碑**:blob 是独立的一条线,排在 M4;I5 和 `cb check` 一起进。

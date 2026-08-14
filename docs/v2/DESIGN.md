@@ -12,7 +12,7 @@
 
 - [`works/branch-topology.md`](works/branch-topology.md) — **分支怎么组织**。单写入面、`[层名]` 声明、投影与重算、全仓库零 merge 节点。附两个被否方案及其实测。
 - [`works/blob-store.md`](works/blob-store.md) — **二进制怎么存**。`blob/` 外置 + 软链、`file --mime-encoding` 判据、钩子改写索引在四种提交方式下的行为、孤儿对象定点清除。
-- [`works/cli.md`](works/cli.md) — **CLI 与 hook**。为什么 `cb` 只剩三条命令、四个 hook 各干什么、锁与退出码,以及"错误信息是智能体的 UI"这条功能需求。
+- [`works/cli.md`](works/cli.md) — **锚定、init、hook、别的分支**。`layers` 文件如何成为唯一真相、`cb init` 在已有仓库上的八步、五个 hook 各干什么、以及别的分支为什么捅不进来(含 `reference-transaction` 的实测)。
 
 ---
 
@@ -43,7 +43,7 @@ git checkout layer/facts     →   工作树 = 只有事实                   �
 
 所以演化是有地板的:无论上层怎么迭代,重新推导的原料永远是那份没被动过的事实。
 
-> 这不是访问控制,是**认知卫生**。目的不是防坏人,是让"我看到的"和"我以为的"在文件系统上是两种东西。防对抗要另外的手段,见 §12。
+> 这不是访问控制,是**认知卫生**。目的不是防坏人,是让"我看到的"和"我以为的"在文件系统上是两种东西。防对抗要另外的手段,见 §13。
 
 ---
 
@@ -94,7 +94,7 @@ layer/beliefs   ●──●
 
 **为什么写入面只能有一条。**若允许在较短的 stack 上写,更长那条要跟进就只有两条路:单亲重算(同一事件出现两个 commit 对象,血缘断开),或者 merge 进来(引入 merge 节点)。收敛成一条之后这个二选一消失:**每个事件有且只有一个权威 commit 对象,其余分支上的一切都是它的投影,血缘、顺序、权威三者一致。**`layer/*` 的历史因此是写入面历史的**子序列**——`git log layer/beliefs` 恰好就是"智能体自己干过的事"。
 
-代价是写入必须串行化,见 §12。
+代价是写入必须串行化,见 §13。
 
 ### 五条不变量
 
@@ -104,7 +104,7 @@ layer/beliefs   ●──●
 - **I4 对应** — `layer/*` 的每个提交都有 `Cb-Stack` trailer 指回写入面上的源提交。
 - **I5 blob 完整** — 每条 `120000` 软链指向的 blob 存在,且内容 sha256 与路径中的哈希一致。
 
-`cb check` 校验这五条。它们被破坏时,不是警告,是仓库坏了。
+`cb check` 校验这五条(只看起始点位之后,见 §7)。它们被破坏时,不是警告,是仓库坏了。
 
 > I1–I4 已在 [`works/exp-single-face.sh`](works/exp-single-face.sh) 里实测通过:五次提交序列后 merge 节点数为 0,所有分支全程 fast-forward,I2 逐字成立。
 
@@ -130,7 +130,7 @@ own(Lᵢ) = tree(layer/Lᵢ) 里的全部路径
 ① chmod a-w        写下层文件的那一刻就 EACCES    ← 最快,给智能体最直白的信号
 ② commit-msg       提交时拒绝                     ← 主拦截,可被 --no-verify 绕过
 ③ 投影器隔离       非法提交进不了 layer/*          ← 兜住 ② 被绕过的情况
-④ pre-receive      push 时拒绝                    ← 唯一不可绕的(暂不做,见 §13)
+④ pre-receive      push 时拒绝                    ← 唯一不可绕的(暂不做,见 §14)
 ```
 
 **本版做 ①②③。**
@@ -213,48 +213,26 @@ tree=$(GIT_INDEX_FILE=$idx git write-tree)
 
 ---
 
-## 7. 配置:层定义放在最底层
+## 7. `layers`:唯一锚定
 
-根目录一个 `collectbase.toml`,顺序即层序,自下而上:
+仓库根目录一个纯文本文件,**一行一层,自下而上**:
 
-```toml
-[[layer]]
-name = "facts"        # 同时是提交信息里的标签,受 [a-z][a-z0-9_-]* 约束
-
-[[layer]]
-name = "notes"
-
-[[layer]]
-name = "beliefs"
-
-[blob]
-threshold = "50MB"                 # 超大文本的兜底阈值
-force_in  = ["**/*.parquet"]       # 即便判成文本也入 blob 库
-force_out = ["**/*.min.js"]        # 即便判成二进制也留在 git
+```
+# collectbase layers — 顺序即层序,第一行是事实层
+facts
+notes
+beliefs
 ```
 
-分支名由层名推出:`layer/<name>`、`stack/<name>`。
+**所有东西都从它推出来**,没有第二处真相:有哪些层、层序、分支名(`layer/<名>`、`stack/<名>`)、写入面(`stack/<最后一行>`)、提交信息的合法标签、以及**起始点位**——首次引入这个文件的那个提交。
 
-**这个文件归最底层所有。**于是层的定义本身也是智能体够不着的东西——它不能给自己加一层、不能改层序、不能把事实层从栈里摘掉。写入面的树里始终有这份文件(它含所有层),hook 从 HEAD 直接读即可,没有引导难题。
+**它归最底层。**改 `layers` 需要一个 `[facts]` 提交,而智能体只能提交 `[beliefs]`。它没法给自己加一层、改层序、把事实层从栈里摘掉。
 
-### hook 跟着仓库走
+**起始点位之前的历史不受任何约束。**已有仓库里那些没有层标签的旧提交、混在一起的二进制、任意的分支结构,全部原样保留、不改写;`cb check` 只校验起始点位之后的部分。collectbase 不接管你的过去,它从某个提交开始接管未来——这是"面向已有仓库"的关键。
 
-Git 的 hook 默认在 `.git/hooks/`,**不随 clone 传播**。所以:
+blob 的可调项另放 `.collectbase/config.toml`(阈值、`force_in` / `force_out`),锚定文件保持最小。
 
-```sh
-git config core.hooksPath .collectbase/hooks
-```
-
-hook 脚本本体放在 `.collectbase/hooks/`,由最底层跟踪,是仓库内容的一部分,clone 出来就在。只剩 `git config` 那一行需要 `cb init` 在每个 clone 里跑一次(Git 的安全设计,绕不过,也不该绕)。
-
-每个 hook 脚本都是一行,逻辑全在 `cb` 里:
-
-```sh
-#!/bin/sh
-exec cb hook commit-msg "$@"
-```
-
----
+> `cb init` 在已有仓库上的完整八步、`layers` 变更时分支集合怎么调整,见 [`works/cli.md`](works/cli.md) §1–§2。
 
 ## 8. 二进制:blob 库
 
@@ -281,12 +259,14 @@ git ls-tree HEAD project/log/screen.png
 
 ## 9. 用起来是什么样
 
-```sh
-# 一次性
-cb init --layers facts,notes,beliefs
-# 建 layer/* 与 stack/*、写 collectbase.toml、装 hook、配 core.hooksPath
+在一个**已经有内容**的仓库里:
 
-git checkout stack/beliefs          # 唯一的写入面,之后不用再切
+```sh
+cb init --layers facts,notes,beliefs
+# 起始点位 = 当前 HEAD;既有 352 个文件全部划归 [facts];建分支、装 hook、切到写入面
+# 之前的历史原样保留,不改写;main 留着不动,此后视作普通分支
+
+# 之后一直待在写入面上,不用再切
 
 # 事实进来(人 / 采集脚本 / 外部同步)
 cp ~/.claude/projects/…/session.jsonl project/log/2026-08-14.jsonl
@@ -316,34 +296,75 @@ git log --oneline stack/beliefs
 
 ---
 
-## 10. CLI:三条命令
+## 10. CLI 与 hook
 
-**逻辑全在 git hook 里**,`cb` 只剩三条:
+命令只有两条:
 
 ```
-cb init --layers a,b,c      建分支拓扑、写配置、装 hook          人跑,一次
-cb hook <name>              hook 入口                          git 调,不给人用
-cb check                    校验不变量(尤其 I5 blob 完整性)    人跑 / CI
+cb init --layers a,b,c      面向已有仓库:定起始点位、既有内容归最底层、建分支、装 hook
+cb check                    校验 I1–I5(尤其 I5 blob 完整性),只看起始点位之后
 ```
 
-凡是"读"的,git 已经有了(`git status` / `git log` / `git branch --list 'layer/*'`;甚至"这个路径归哪层"都不用问——下层是 444,`ls -l` 就是答案)。凡是"写"的,应该由钩子自动发生,而不是等人想起来敲命令。留下的三条恰好是 git 覆盖不到的:初始化、钩子本体、以及 git 看不见的 blob。
+**hook 不是 `cb` 的子命令。**collectbase 用 pip 分发,hook 就是直接调 python 的小脚本,打开一眼看懂:
 
-> 四个 hook 的职责、越界时的停止规则、锁、退出码,见 [`works/cli.md`](works/cli.md)。其中「错误信息是智能体的 UI」是功能需求而非文档规范——智能体和 collectbase 的接触面几乎只有钩子的拒绝信息,那几行字是它唯一能学到规矩的地方。
+```python
+#!/usr/bin/env python3
+import sys
+from collectbase.hooks import commit_msg
+raise SystemExit(commit_msg(sys.argv[1:]))
+```
+
+五个 hook:`pre-commit`(blob 转换)、`commit-msg`(三条校验)、`post-commit`(投影 + 重算)、`post-checkout`(chmod)、`reference-transaction`(否决未经 collectbase 的 ref 更新,见 §11)。
+
+其余一切用 git:读的 git 已经有了(`git status` / `git log` / `git branch --list 'layer/*'`;甚至"这个路径归哪层"都不用问——下层是 444,`ls -l` 就是答案),写的由 hook 自动发生。
+
+> 完整规格见 [`works/cli.md`](works/cli.md)。其中「错误信息是智能体的 UI」是功能需求而非文档规范——智能体和 collectbase 的接触面几乎只有 hook 的拒绝信息。
 
 ---
 
-## 11. 边界(v2 不做什么)
+## 11. 其他分支:允许存在,但内容进不来
+
+`git checkout -b scratch` 谁都能敲,也控不住,所以**其他分支是允许的**,hook 在上面直接放行,那是自由的草稿空间。
+
+但草稿分支上的东西**不能绕过 `[层名]` 校验捅进写入面**。实测发现 `commit-msg` 只覆盖"新写一个提交"这一条路,四种操作里三种能绕过:
+
+| 操作 | `commit-msg` | 结果 |
+|---|---|---|
+| `git commit` | ✅ | 受控 |
+| `git merge --no-ff` | ✅ | 可拒 |
+| `git merge`(可 FF) | ❌ | 写入面被静默移到未校验的提交 |
+| `git cherry-pick` | ❌ | 无标签的提交直接进了写入面 |
+| `git rebase` | ❌ | 写入面被整个重写 |
+| `git reset --hard` | ❌ 一个 hook 都不跑 | 写入面被移走 |
+
+**凡是移动 ref 而不新建提交内容的操作,`commit-msg` 全看不见。**
+
+解法是 `reference-transaction` 钩子(git 2.28+):它在每一次 ref 更新的 `prepared` 阶段触发,**能否决整个事务**,是唯一覆盖 merge-FF / reset / rebase / cherry-pick / push 的钩子。规则一句话:**`refs/heads/{layer,stack}/*` 的更新,只有 collectbase 自己发起的才放行**(`commit-msg` 校验通过后放一个令牌,`post-commit` 做完全部 `update-ref` 之后收回)。实测 `reset --hard` 与 `merge` 均被拒且写入面纹丝不动,正常 `git commit` 照常通过。
+
+于是规矩很清楚:**草稿分支随便用;想把成果拿进来,只有在写入面上正常提交这一条路。**
+
+```sh
+git checkout stack/beliefs
+git checkout scratch -- path/to/file
+git commit -m "[beliefs] …"
+```
+
+> 令牌是文件不是密钥,能写文件的进程就能伪造——这道闸挡的是"顺手一个 `git reset` 把写入面搞坏",不是对抗,和 §13 其余防线同级。另:`git fetch`/`pull` 对 `stack/*` 的更新也会被拦,单机下正确,多 clone 协作时要重新设计。
+
+---
+
+## 12. 边界(v2 不做什么)
 
 - **不管内容格式。** 层里放什么文件、什么结构、怎么互相引用,是使用者的事。工具只管路径归属、分支拓扑、以及二进制的**存放位置**(内容仍然不管)。
 - **不做采集。** v1 的 worker 全部作废。事实怎么进事实层——脚本、rsync、人手动 cp——都行。
 - **不推给任何下游。** 没有 sink,没有 memory system,没有 HTTP。
 - **不做联合挂载 / FUSE。** 视图由 `git checkout` 提供,足够了。
 - **不做冲突解决。** 按设计不会有冲突;出现了就是损坏,报错而非修复。
-- **不做访问控制。** 本地 hook 是认知卫生,不是安全(§12)。
+- **不做访问控制。** 本地 hook 是认知卫生,不是安全(§13)。
 
 ---
 
-## 12. 已知弱点
+## 13. 已知弱点
 
 写在这里是因为它们**不是 bug,是这一版的选择**。
 
@@ -362,13 +383,13 @@ cb check                    校验不变量(尤其 I5 blob 完整性)    人跑 
 ### 要硬边界,只有两条路,都在 git 之外
 
 - **uid 边界。** 事实文件与 blob 属于 uid A、模式 444,智能体跑 uid B。它不是所有者,`chmod` 是内核拒绝。目录加 sticky 位(`1775`,`/tmp` 那套),它删不掉不属于自己的文件,但仍能在同一目录里新建自己的——**交错布局不受影响**。这条和本设计完全兼容,是需要防对抗时的推荐方案。
-- **服务端 `pre-receive`**,见 §13。
+- **服务端 `pre-receive`**,见 §14。
 
 **M5 之前,这套东西的保证强度是"防手滑,不防对抗"。**用在自己驱动的 harness 上够用;要跑不受信任的智能体,配 uid 边界或等 M6。
 
 ---
 
-## 13. 服务端:留着的那条路
+## 14. 服务端:留着的那条路
 
 规则同源、一份实现,只换执行点。`pre-receive` 相比本地多三样东西:
 
@@ -376,29 +397,29 @@ cb check                    校验不变量(尤其 I5 blob 完整性)    人跑 
 2. **看得见整个 push 的每个 commit**,补上"先越界再改回来"那个漏洞(本地 hook 只看得见当次提交)。
 3. **规则只有一份。**
 
-而且**投影和重算可以整个挪到服务端**:`post-receive` 里做 §6 的两个树运算,服务器成为不变量的唯一维护者,客户端彻底不用管,§12 ③ 的提交锁也变成服务端的串行化。
+而且**投影和重算可以整个挪到服务端**:`post-receive` 里做 §6 的两个树运算,服务器成为不变量的唯一维护者,客户端彻底不用管,§13 ③ 的提交锁也变成服务端的串行化。
 
 成本比想象的低:`pre-receive` 只要接收方是个 bare 仓库就会跑,**本机一个目录就行**,不需要守护进程。要真正的信任边界才需要进程边界——bare 仓库换个 uid + `git-shell`,零长驻进程。
 
 ---
 
-## 14. 里程碑
+## 15. 里程碑
 
-- **M1 骨架** — `cb init` 建 `layer/*` + `stack/*`、写 `collectbase.toml`、装 hook;归属推导;`cb check`(I1–I4)。仓库能立起来,不变量能验证。
-- **M2 拦截** — `commit-msg` 三条校验 + `post-checkout` 的 chmod。地板生效。
+- **M1 骨架** — `cb init` 面向已有仓库的八步(起始点位、既有内容归最底层、建分支、装 hook);`cb check`(I1–I4)。仓库能立起来,不变量能验证。
+- **M2 拦截** — `commit-msg` 三条校验 + `reference-transaction` 令牌协议 + `post-checkout` 的 chmod。地板生效,别的分支也进不来。
 - **M3 传播** — `post-commit` 做投影 + 重算,加提交锁。写入面和派生分支自动保持一致。
 - **M4 blob** — `pre-commit` 转换 + 孤儿定点清除 + `cb blob gc`;I5 进 `cb check`。
-- **M5 手感** — 钩子的拒绝信息说人话:告诉它"这个路径归 facts,你要表达异议就在自己层里另写一份并引用它",带具体命令。见 [`works/cli.md`](works/cli.md) §5。
-- **M6(之后)** — 服务端 `pre-receive` + ref 级授权,把 §12 ① 补上。
+- **M5 手感** — 钩子的拒绝信息说人话:告诉它"这个路径归 facts,你要表达异议就在自己层里另写一份并引用它",带具体命令。见 [`works/cli.md`](works/cli.md) §6。
+- **M6(之后)** — 服务端 `pre-receive` + ref 级授权,把 §13 ① 补上。
 
 ---
 
-## 15. 待定
+## 16. 待定
 
 - **supersede 语义。** 上层想说"下层那条过时了",在没有覆盖和删除的世界里怎么表达?靠约定的引用(新文件里写明 supersedes 谁),还是读的时候按层高排优先级?不填的话上层会越积越多陈旧结论。M5 之前得有个说法,哪怕只是一条约定。
 - **事实层是否 append-only。** 现在只保证"上层动不了",没保证"事实层自己不能删"。要不要禁止事实层的删除与修改?
 - **层的增删。** 中途在 1 和 2 之间插一层,意味着上面所有 `stack/*` 要重建。支持,还是明确不支持、只能重建仓库?
-- **提交锁的形态。** §12 ③,以及采集脚本被阻塞时的行为。
+- **提交锁的形态。** §13 ③,以及采集脚本被阻塞时的行为。
 - **规模。** `ls-tree` 拼索引在几万文件时的耗时;每次提交都要重算 N-1 条 stack 的并集树,提交频繁时可能需要增量化(只把改动的路径 patch 进上一棵树)。
 - **blob 的日期与"事实发生时间"的关系。** 现在用添加时刻;采集三个月前的会话时,截图会落在今天的日期下。要不要允许声明一个逻辑日期?
 - **软链在 Windows 上**需要开发者模式或管理员权限。当前只面向 Linux harness。
