@@ -4,7 +4,7 @@
 >
 > 主设计见 [`../DESIGN.md`](../DESIGN.md),分支拓扑见 [`branch-topology.md`](branch-topology.md)。本篇与分层机制正交,但在 §6 有一处重要交叉——**它在事实层的地板上开了个洞**。
 >
-> 文中"实测"均来自真实执行(git 2.39.5),脚本 [`exp-blob.sh`](exp-blob.sh)。
+> 文中"实测"均来自真实执行(git 2.39.5),脚本见同目录 `exp-*.sh`。
 
 ---
 
@@ -83,9 +83,10 @@ force_out  = ["**/*.min.js"]      # 即便判成二进制也留在 git
 while read -r f; do
   [ -L "$f" ] && continue                                   # 已是软链,跳过
   [ "$(file -b --mime-encoding "$f")" = binary ] || continue
+  orphan=$(git rev-parse ":$f")                             # 记下将被孤立的对象
   …移进 blob,原地建相对软链…
-  git rm --cached "$f"; git add "$f"                        # 踢掉原条目,换成软链
-  echo "$f" >> .git/cb-converted                            # 交给 post-commit
+  git add "$f"                                              # 索引条目 100644 → 120000
+  echo "$f $orphan" >> .git/cb-converted                    # 交给 post-commit
 done
 ```
 
@@ -108,16 +109,45 @@ done
 
 3. **部分提交要用 `post-commit` 补主索引。** `git commit -- <path>` 时钩子拿到的是临时索引(`next-index-*.lock`),改动对本次提交有效,但**主索引里其他已暂存路径仍留着转换前的条目**。`post-commit` 里对转换过的路径重新 `git add` 一遍即可。实测:紧接着提交剩下那个文件,进去的仍然是软链。
 
-### 代价:孤儿对象
+`post-commit` 同时负责清掉记下的孤儿对象(见下)。
+
+### 孤儿对象:定点清除
 
 `git add project/big.iso` 那一刻,原始字节已经写进 `.git/objects` 了。钩子换掉索引条目只是让它变成**不可达对象**,并不会删掉它。
 
-实测:全程 add 了约 10 MB 二进制,`.git` = **10 M**;`git reflog expire --expire-unreachable=now --all && git gc --prune=now` 之后回到 **176 K**。
+**但钩子知道那个对象的 OID**(`git rev-parse :<path>`,在替换索引条目之前取),所以完全不必全库清理。三种做法实测对照——特意先造一个 `git reset --hard` 丢掉的提交当"后悔药",看谁会误伤它:
 
-清得掉,但那条命令**会连带清掉所有不可达的 reflog 记录**,`git reset --hard` 之后的救命稻草就没了。所以:
+| 做法 | 孤儿(8 MB) | `reset --hard` 的后悔药 | `.git` |
+|---|---|---|---|
+| **A. 定点删松散对象文件**<br>`rm .git/objects/f2/57a82…` | ✅ 清除 | ✅ **完好**,内容可取回 | 7.9 M → **236 K** |
+| **B. `git prune --expire=now`** | ✅ 清除 | ✅ **完好**,内容可取回 | 7.9 M → **232 K** |
+| C. `reflog expire --expire-unreachable=now --all` + `gc --prune=now` | ✅ 清除 | ❌ **没了** | → 172 K |
 
-- 默认**不主动清**,交给 git 正常的 gc(不可达对象两周后过期)。临时占点磁盘,安全。
-- `cb blob reclaim` 做立即回收,命令输出里明写 reflog 的代价。
+A 之后 `git fsck` 全库自检无任何 error。
+
+> **更正一处此前的判断:**`git prune --expire=now` **本身尊重 reflog**,不会毁掉 `reset --hard` 的后悔药。之前把 C 的破坏性算到了 prune 头上,实际上是同行的 `reflog expire` 干的。所以"要清就得毁 reflog"不成立。
+
+**默认走 A**:`git add` 产生的是松散对象(单个大文件不会触发 `gc --auto` 打包),`post-commit` 里按记下的 OID 直接删掉那一个文件即可。比 B 快(不用遍历全部引用),而且并发上更安全——B 会清掉**所有**当前不可达的对象,万一另一个 git 进程正在半途创建对象就会被误伤,这正是 git 默认给两周宽限期的原因。
+
+删之前加一道确认:该 OID 确实不被任何 ref、reflog、索引引用(内容碰巧和历史里某个已有对象相同时,它压根不是新建的,不能删)。这个判断做不了的时候退回 B,并先用 `git prune -n --expire=now` 打印将要删除的清单——实测它精确列出了那一个孤儿:
+
+```
+$ git prune -n --expire=now
+f257a8243235cd243e963beb71d4bff355ee92ab blob
+```
+
+C 永远不用。
+
+### 顺带:`git rm --cached` 是多余的
+
+`git add <path>` 本身就会把索引里的 `100644` 条目替换成 `120000` 软链条目,实测:
+
+```
+add 后索引:        100644 1e0702c2…  f.png
+只用 git add 之后:  120000 59f0df3a…  f.png
+```
+
+先 `git rm --cached` 反而会报 `staged content different from both the file and the HEAD`。钩子里一条 `git add` 就够。
 
 ### 可选:watcher 主路径
 
@@ -220,7 +250,7 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 | `cb blob verify [--missing]` | 重新哈希比对 / 列出缺失的 blob |
 | `cb blob gc [--dedup]` | 按全历史活集清理;`--dedup` 跨天硬链接合并 |
 | `cb blob push / pull <remote>` | 按活集同步库;`git clean -xdf` 之后靠它恢复 |
-| `cb blob reclaim` | 立即回收误 add 产生的孤儿对象(会清 reflog,命令自己会警告) |
+| `cb blob reclaim` | 兜底回收孤儿对象(`git prune --expire=now`,先 `-n` 打印清单) |
 | `cb watch` | 可选常驻,文件落地即转换,不产生孤儿对象 |
 | `cb doctor` | 报告缺失的 blob,并给出恢复命令 |
 
@@ -230,7 +260,7 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 
 ## 9. 实测汇总
 
-脚本:[`exp-blob.sh`](exp-blob.sh)(布局与体积)、[`exp-hook.sh`](exp-hook.sh)(钩子改写索引)。
+脚本:[`exp-blob.sh`](exp-blob.sh)(布局与体积)、[`exp-hook.sh`](exp-hook.sh)(钩子改写索引)、[`exp-prune.sh`](exp-prune.sh)(孤儿对象清理)。
 
 **布局与体积**
 
@@ -255,7 +285,10 @@ layer/facts 里的  project/log/screen.png  →  blob/2026/07/23/<sha>.png
 | `git commit --amend` | ✅ 软链 |
 | 全历史审计:有无非软链的大对象进过提交 | ✅ **无** |
 | `--diff-filter=ACM`(漏掉 `T`) | ❌ `commit -a` 漏进 2 MB 原文件,且钩子表面正常 |
-| 误 add 累积的孤儿对象 | `.git` **10 M** → `reflog expire + gc --prune=now` → **176 K** |
+| 孤儿对象:定点删松散文件 | ✅ 7.9 M → **236 K**,`git fsck` 无 error,reflog 后悔药完好 |
+| 孤儿对象:`git prune --expire=now` | ✅ 7.9 M → **232 K**,**后悔药完好**(prune 尊重 reflog) |
+| 对照:`reflog expire` + `gc --prune=now` | ⚠️ 172 K,但**后悔药被毁** —— 不要用 |
+| `git rm --cached` 是否必需 | ❌ 多余,`git add` 自己就把 100644 换成 120000 |
 
 ---
 
