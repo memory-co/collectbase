@@ -12,6 +12,7 @@
 
 - [`works/branch-topology.md`](works/branch-topology.md) — **分支怎么组织**。单写入面、`[层名]` 声明、投影与重算、全仓库零 merge 节点。附两个被否方案及其实测。
 - [`works/blob-store.md`](works/blob-store.md) — **二进制怎么存**。`blob/` 外置 + 软链、`file --mime-encoding` 判据、钩子改写索引在四种提交方式下的行为、孤儿对象定点清除。
+- [`works/server.md`](works/server.md) — **`cb serve`**(可选)。blob 传到 S3 / OSS,以及一个能拖拽上传、选层的网页入口。它没有特权,走和人一样的提交路径。
 - [`works/cli.md`](works/cli.md) — **锚定、init、hook、别的分支**。`layers` 文件如何成为唯一真相、`cb init` 在已有仓库上的八步、五个 hook 各干什么、以及别的分支为什么捅不进来(含 `reference-transaction` 的实测)。
 
 ---
@@ -321,7 +322,10 @@ git log --oneline stack/beliefs
 ```
 cb init --layers a,b,c      面向已有仓库:定起始点位、既有内容归最底层、建分支、装 hook
 cb check                    校验 I1–I5(尤其 I5 blob 完整性),只看起始点位之后
+cb serve                    可选:blob 出口 + 网页上传入口(见 works/server.md)
 ```
+
+`cb serve` 是**可选**的:不跑它整套机制照常工作(分层、校验、投影、blob 转换全在 hook 里,零常驻进程)。而且它**没有特权**——往仓库里写东西的方式和人敲 `git commit` 一模一样,被同一套 hook 校验。只要 server 有一条绕过 hook 的路径,那条路径就是地板上的洞,而它恰好是唯一可能被网络访问到的组件。
 
 **hook 不是 `cb` 的子命令。**collectbase 用 pip 分发,hook 就是直接调 python 的小脚本,打开一眼看懂:
 
@@ -459,6 +463,7 @@ git commit -m "[beliefs] …"
 - **M3 传播** — `post-commit` 做投影 + 重算,加提交锁。写入面和派生分支自动保持一致。
 - **M4 blob** — `pre-commit` 转换 + 孤儿定点清除 + `cb blob gc`;I5 进 `cb check`。
 - **M5 手感** — 钩子的拒绝信息说人话:告诉它"这个路径归 facts,你要表达异议就在自己层里另写一份并引用它",带具体命令。见 [`works/cli.md`](works/cli.md) §6。
+- **S1–S4(与 M4 之后并行)** — `cb serve`:blob 传到对象存储 + 网页上传入口。见 [`works/server.md`](works/server.md) §6。
 - **M6(之后)** — 服务端 `pre-receive` + ref 级授权,把 §13 ① 补上。
 
 ---
