@@ -12,7 +12,7 @@ Two layers of types live here:
      helpers ``Text`` / ``Thinking`` / ``Code`` / ``ToolUse`` /
      ``ToolResult`` / ``Block``. Worker authors call these; they return
      the wire models above so ``to_round`` / ``parse`` can hand results
-     straight to the engine. See docs/session-format.md.
+     straight to the engine. See docs/v1/session-format.md.
 
 The builders return ``None`` for empty content so a worker can write
 ``[b for b in map(_block, raw) if b]`` and have empty blocks vanish.
@@ -50,7 +50,7 @@ class RoundInput(BaseModel):
     ``index`` is deliberately absent — the server assigns it on first
     write and keeps it stable across re-ingests. Workers supply
     ``round_id`` (the platform / synthesized id) which the server uses
-    to align with already-stored rounds. See docs/session-format.md §3.
+    to align with already-stored rounds. See docs/v1/session-format.md §3.
     """
 
     round_id: str
@@ -115,7 +115,7 @@ def Round(
     sidechain: bool = False,
     usage: dict[str, Any] | None = None,
 ) -> RoundInput:
-    """Build one normalized round (see docs/session-format.md §1).
+    """Build one normalized round (see docs/v1/session-format.md §1).
 
     ``content`` accepts a plain ``str`` (wrapped into a single ``Text``
     block) or an iterable of blocks; ``None`` entries are dropped so

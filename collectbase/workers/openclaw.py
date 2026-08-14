@@ -1,6 +1,6 @@
 """Openclaw worker — HTTP-backed session source (polling).
 
-Exercises the ``PollWorker`` tier (docs/worker.md §7): no files on disk,
+Exercises the ``PollWorker`` tier (docs/v1/worker.md §7): no files on disk,
 the engine polls ``list_remote`` every ``poll`` and pulls ``fetch``.
 Per-session change detection rides the ETag: the probe's ``sha256`` = the
 session's ETag, so the engine short-circuits unchanged sessions exactly

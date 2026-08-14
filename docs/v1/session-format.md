@@ -2,7 +2,7 @@
 
 > worker 归一的落点、也是 sink 推给 memory 的 wire 格式。**上游千奇百怪,进门只认这一种形状。** 本篇定义 `Round` / `ContentBlock` 的字段、构造器、幂等规则,以及 session 级的 id 铸造与元数据。
 >
-> 谁生产它:worker 的 `to_round` / `parse`([worker.md](worker.md))。谁消费它:sink 的 `append_rounds`([../DESIGN.md](../DESIGN.md) §6)。
+> 谁生产它:worker 的 `to_round` / `parse`([worker.md](worker.md))。谁消费它:sink 的 `append_rounds`([../../DESIGN.md](../../DESIGN.md) §6)。
 
 ---
 

@@ -2,7 +2,7 @@
 
 > 一个 worker = 一个数据来源的适配器。本篇讲**怎么写一个 worker**,以及 engine 替你扛掉了哪些活。目标只有一个:**让你用几十行、只写来源特有的那部分,就把一种新来源接进来**——声明监听哪些文件,把一条原始记录变成标准 `Round`,别的不用管。
 >
-> 标准产物(`Round` / `ContentBlock`)的字段与构造器在 [session-format.md](session-format.md);engine 的 7 步驱动路径在 [../DESIGN.md](../DESIGN.md) §8。
+> 标准产物(`Round` / `ContentBlock`)的字段与构造器在 [session-format.md](session-format.md);engine 的 7 步驱动路径在 [../../DESIGN.md](../../DESIGN.md) §8。
 
 ---
 
@@ -188,7 +188,7 @@ Round(
 
 ## 7. 裸端口 `Worker`:什么时候下探
 
-来源根本不在磁盘上(HTTP API、webhook、DB),或映射太特殊,继承裸 `Worker`,实现 4 方法(即 [DESIGN.md](../DESIGN.md) §4 的契约)。`PollWorker` 是它的一个便捷子类(engine 按 `poll` 间隔驱动):
+来源根本不在磁盘上(HTTP API、webhook、DB),或映射太特殊,继承裸 `Worker`,实现 4 方法(即 [DESIGN.md](../../DESIGN.md) §4 的契约)。`PollWorker` 是它的一个便捷子类(engine 按 `poll` 间隔驱动):
 
 ```python
 class OpenclawWorker(PollWorker):

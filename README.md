@@ -34,10 +34,10 @@ cb = await Collectbase.open(
 await cb.start(); ...; await cb.close()
 ```
 
-内置 worker:`claude-code` · `codex`(fs 型)· `openclaw`(HTTP poll 型)。加一个来源见 [docs/worker.md](docs/worker.md)。
+内置 worker:`claude-code` · `codex`(fs 型)· `openclaw`(HTTP poll 型)。加一个来源见 [docs/v1/worker.md](docs/v1/worker.md)。
 
 ## 文档
 
-设计与契约见 **[DESIGN.md](DESIGN.md)**;子系统展开见 **[docs/](docs/)**——重点是 **[docs/worker.md](docs/worker.md)**(怎么用几十行写一个 worker:声明监听哪些文件、把一条记录解析成标准 round)与 **[docs/session-format.md](docs/session-format.md)**(标准化产物)。
+设计与契约见 **[DESIGN.md](DESIGN.md)**;子系统展开见 **[docs/v1/](docs/v1/)**——重点是 **[docs/v1/worker.md](docs/v1/worker.md)**(怎么用几十行写一个 worker:声明监听哪些文件、把一条记录解析成标准 round)与 **[docs/v1/session-format.md](docs/v1/session-format.md)**(标准化产物)。
 
 > 状态:M1+M2 已实现并测试(29 passed);engine / checkpoint / sink(InProcess + Http)/ 三个内置 worker 齐活,可独立跑通。

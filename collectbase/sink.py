@@ -1,6 +1,6 @@
 """Sink — the only contact surface with the memory system.
 
-Two operations, cursor-based and append-only (see docs/DESIGN.md §6):
+Two operations, cursor-based and append-only (see DESIGN.md §6):
 
   ensure_session(req)  → where does the server's cursor stand?
   append_rounds(req)   → write rounds strictly after expected_prev_round_id

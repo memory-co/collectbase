@@ -2,7 +2,7 @@
 
 One JSONL file per session, date-partitioned. Each line is an *envelope*
 ``{"timestamp", "type", "payload"}``. This worker exercises two hooks
-that claude-code didn't need (see docs/worker.md §3):
+that claude-code didn't need (see docs/v1/worker.md §3):
 
   - ``session_id`` — the id lives in the in-file ``session_meta`` record;
     the filename is only a fallback for truncated files.

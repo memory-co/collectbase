@@ -2,7 +2,7 @@
 
 Collect raw sessions from many sources, normalize each into the standard
 session format, and push them into a memory system. See DESIGN.md and
-docs/.
+docs/v1/.
 
 Typical use:
 

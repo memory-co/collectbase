@@ -1,6 +1,6 @@
 """Worker — a data-source adapter.
 
-Three tiers, pick the cheapest that fits (see docs/worker.md §1):
+Three tiers, pick the cheapest that fits (see docs/v1/worker.md §1):
 
   - ``JsonlWorker`` — append-only line-delimited logs (claude-code,
     codex, most agent tools). Author writes ``to_round`` + ``round_id``;

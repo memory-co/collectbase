@@ -3,7 +3,7 @@
 Each ``.jsonl`` file is one session; each line is one platform message;
 ``round_id`` = the message ``uuid``.
 
-The worker body is small on purpose (see docs/worker.md §4): the engine
+The worker body is small on purpose (see docs/v1/worker.md §4): the engine
 does watching / hashing / line-seek / cursor / retry. What's left here is
 the only genuinely claude-code-specific logic:
 
