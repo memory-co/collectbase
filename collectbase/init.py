@@ -93,8 +93,8 @@ def run(git: Git, names: list[str]) -> Plan:
     # ⑤ 装 hook —— 必须最后做,否则 reference-transaction 会拦住上面的 update-ref
     _write_hooks(git)
 
-    # ⑥ 切到 stack 并上锁
-    git.run("checkout", "-q", "stack")
+    # ⑥ 切到最底层 —— 提交打在权威分支上,stack 只接收 merge
+    git.run("checkout", "-q", f"layer/{layers.bottom}")
 
     return Plan(start, created, reused, adopted)
 
@@ -106,8 +106,8 @@ def _reinit(git: Git, layers: L.Layers) -> Plan:
     it is not something to route around.
     """
     _write_hooks(git)
-    if git.resolve(layers.stack_ref) is not None:
-        git.run("checkout", "-q", "stack")
+    if git.resolve(layers.layer_ref(layers.bottom)) is not None:
+        git.run("checkout", "-q", f"layer/{layers.bottom}")
     start = L.start_point(git) or git.resolve("HEAD") or ""
     return Plan(start, [], list(layers.managed_refs()), 0)
 

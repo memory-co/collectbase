@@ -45,8 +45,9 @@ def test_起始点位之前的历史不受约束(repo):
     assert "pre-existing work" in subjects
 
 
-def test_切到了写入面并装好了钩子(repo):
-    assert repo.sh("symbolic-ref", "HEAD").stdout.strip() == "refs/heads/stack"
+def test_切到了事实层并装好了钩子(repo):
+    """提交打在权威分支上,所以 init 把你放在最底层,不是 stack。"""
+    assert repo.sh("symbolic-ref", "HEAD").stdout.strip() == "refs/heads/layer/facts"
     hooks_dir = repo.root / ".git" / "cb-hooks"
     assert repo.sh("config", "core.hooksPath").stdout.strip() == str(hooks_dir)
     for name in init_mod.HOOK_NAMES:
@@ -60,12 +61,12 @@ def test_钩子不在工作区里(repo):
     repo.sh("checkout", "-q", "layer/notes")
     assert (repo.root / ".git" / "cb-hooks" / "commit-msg").exists()
     repo.write("hand.md", "x\n")
-    out = repo.commit("[beliefs] 层名对不上")
+    out = repo.commit("[beliefs] 层名对不上", stay=True)
     assert out.returncode != 0, "钩子还在,层名不符要被拒"
 
 
 def test_下层文件被设成只读(repo):
-    repo.sh("checkout", "-q", "stack")
+    repo.sh("checkout", "-q", "layer/beliefs")
     from collectbase import hooks
     import os
 

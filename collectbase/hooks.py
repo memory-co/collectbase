@@ -82,6 +82,20 @@ def commit_msg(argv: list[str]) -> int:
     here = _here(git, layers)
     if here is None:
         return 0  # 别人的分支,不关我们的事
+    if here == "stack":
+        _say(
+            "✗ 拒绝提交:stack 只接收 merge,提交要打在权威分支上。",
+            "",
+            "  层分支只放这一层的内容,而提交的 SHA 必须原封不动地成为权威提交。",
+            "  在 stack 上提交的话,那个对象带着所有层的内容,搬过去就得复制一份,",
+            "  SHA 就变了。所以:",
+            "",
+            f"      git checkout layer/<层>        # {' / '.join(layers.names)}",
+            "      git commit -m \"[<层>] …\"",
+            "",
+            "  本次提交未产生任何改动,工作区保持原样。",
+        )
+        return 1
 
     subject = ""
     if argv:
@@ -89,11 +103,10 @@ def commit_msg(argv: list[str]) -> int:
         subject = text[0] if text else ""
     tag = L.tag_of(subject)
 
-    if here != "stack" and tag is not None and tag != here:
+    if tag is not None and tag != here:
         _say(
             f"✗ 拒绝提交:你在 layer/{here} 上,却声明了 [{tag}]。",
-            f"  要么把信息改成 [{here}],要么切到 layer/{tag},",
-            "  要么在 stack 上提交——那里所有层的文件都看得见,hook 会自动归位。",
+            f"  要么把信息改成 [{here}],要么切到 layer/{tag} 再提交。",
         )
         return 1
 
@@ -115,7 +128,7 @@ def commit_msg(argv: list[str]) -> int:
 
 
 def post_commit(argv: list[str] | None = None) -> int:
-    """归位:把提交放到权威层,再把 merge 节点做出来。"""
+    """把这条层分支的新提交 merge 进 stack —— 原样,同一个 SHA。"""
     git = _repo()
     layers = L.read(git)
     if layers is None:
@@ -134,10 +147,10 @@ def post_commit(argv: list[str] | None = None) -> int:
     result = normalize.run(git, layers)
     if not result.ok:
         _say(
-            "✗ collectbase:无法归位。",
+            "✗ collectbase:无法 merge 进 stack。",
             f"  {result.reason}",
-            "  提交还在,但它没有落到任何权威层上。改完提交信息再试:",
-            "      git commit --amend",
+            "  权威分支不受影响;stack 是构建产物,可以随时重建:",
+            "      cb rebuild",
         )
         return 1
     _relock(git, layers)

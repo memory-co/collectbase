@@ -15,6 +15,10 @@ def face(repo) -> str:
     return repo.sh("rev-parse", "refs/heads/layer/notes").stdout.strip()
 
 
+def stack(repo) -> str:
+    return repo.sh("rev-parse", "refs/heads/stack").stdout.strip()
+
+
 # ----------------------------------------------------------------- 正常路径
 
 def test_合规提交放行(repo):
@@ -24,13 +28,16 @@ def test_合规提交放行(repo):
 
 
 def test_一个提交只能属于一层(repo):
-    repo.write("project/note.md", "n\n")
-    repo.commit("[notes] 一条笔记")
+    """在 layer/notes 上顺手改一个事实层的文件 —— 被拒。"""
+    repo.on("notes").write("project/note.md", "n\n")
+    repo.commit("[notes] 一条笔记", stay=True)
+    repo.on("notes")
+    (repo.root / "project/api.md").chmod(0o644)
+    repo.write("project/api.md", "顺手改了事实\n")
     repo.write("project/note.md", "n2\n")
-    repo.write("project/fact.md", "f\n")
-    out = repo.commit("[facts] 想顺手把笔记也带上")
+    out = repo.commit("[notes] 想顺手把事实也带上", stay=True)
     assert out.returncode != 0
-    assert "属于层 [notes]" in out.stderr
+    assert "属于层 [facts]" in out.stderr
 
 
 # ------------------------------------------------- --no-verify 跳不过 ref 守卫
@@ -59,12 +66,12 @@ def scratch(repo):
     start = face(repo)
     repo.sh("checkout", "-q", "-b", "scratch", start)
     repo.write("project/draft.md", "draft\n")
-    repo.commit("随手写的,没有层标签", no_verify=True)
+    repo.commit("随手写的,没有层标签", no_verify=True, stay=True)
     untagged = repo.head()
     repo.write("project/good.md", "good\n")
-    repo.commit("[notes] 一个合规的提交", no_verify=True)
+    repo.commit("[notes] 一个合规的提交", no_verify=True, stay=True)
     tagged = repo.head()
-    repo.sh("checkout", "-q", "stack")
+    repo.on("notes")
     return untagged, tagged
 
 
@@ -103,20 +110,21 @@ def test_cherry_pick_合规提交放行(repo, scratch):
     """判据是内容,所以合规的 cherry-pick 自然该过,不必为它开特例。"""
     _, tagged = scratch
     out = repo.sh("cherry-pick", tagged, check=False)
-    assert out.returncode == 0, out.stderr
+    assert out.returncode == 0, out.stderr + out.stdout
     assert repo.subject() == "[notes] 一个合规的提交"
-    assert "project/good.md" in repo.tree("refs/heads/layer/notes")
+    assert "project/good.md" in repo.own("refs/heads/layer/notes")
 
 
 # --------------------------------------------------------------- 自授权
 
 def test_同一提交里加层并使用该层被拒(repo):
     """layers 从 old 读,不是从 new 读——否则提交可以给自己发证。"""
+    repo.on("facts")
     repo.write("layers", "- facts\n- notes\n- beliefs\n- evil\n")
     repo.write("project/evil.md", "pwned\n")
-    out = repo.commit("[evil] 自己给自己发证", no_verify=True)
+    out = repo.commit("[evil] 自己给自己发证", no_verify=True, stay=True)
     assert out.returncode != 0
-    assert "未知的层" in out.stderr
+    assert "声明的是 [evil]" in out.stderr
 
 
 def test_加一层就是改锚定(repo):

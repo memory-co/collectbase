@@ -157,13 +157,13 @@ def check_update(git: Git, ref: str, old: str, new: str, *, threshold: int | Non
 
 
 def _check_stack(git: Git, old: str, new: str, threshold: int | None) -> Verdict:
-    """stack 也设防,只是规则不同:**不要求 fast-forward**(归位时会改写它),
-    也不禁止 merge 节点(它本来就全是 merge)。
+    """stack 只接收 merge。
 
-    但**每个提交都必须带合法的 [层名]**,merge 节点也一样——它的信息是从权威
-    提交逐字复制过来的,所以这条要求是自然满足的,而一个不满足它的节点就说明
-    那不是归位产生的。内容检查同样要做:否则 `--no-verify` 在 stack 上就没人
-    拦了,而 post-commit 的退出码 git 根本不理会。
+    规则很短:新增的每个提交都必须是 **merge 节点**,而且带合法的 ``[层名]``
+    ——它的信息是从权威提交逐字复制来的,所以这条自然满足;不满足就说明那不是
+    归位产生的。内容不用重查,merge 进来的那个提交在权威分支那一侧已经验过。
+
+    不要求 fast-forward:``cb rebuild`` 会整条重造,它是构建产物。
     """
     v = Verdict()
     if new == ZERO or old == ZERO:
@@ -173,7 +173,6 @@ def _check_stack(git: Git, old: str, new: str, threshold: int | None) -> Verdict
         return v
     if threshold is None:
         threshold = _threshold(git, new)
-    table = owners(git, layers)
     for commit in git.commits_between(old, new):
         tag = L.tag_of(git.subject(commit))
         if tag is None:
@@ -184,21 +183,13 @@ def _check_stack(git: Git, old: str, new: str, threshold: int | None) -> Verdict
             # 给自己发证。
             v.fail(f"提交 {commit[:7]}:未知的层 [{tag}];当前 layers = {', '.join(layers.names)}")
             return v
-        if len(git.parents(commit)) != 1:
-            continue  # merge 节点的内容已在权威分支那一侧验过
-        got = check_payload(
-            git, layers, tag,
-            git.changed_entries(commit),
-            git.changed_paths(commit),
-            table,
-            threshold=threshold,
-        )
-        if not got.ok:
-            v.errors += [f"提交 {commit[:7]}:{e}" for e in got.errors]
+        if len(git.parents(commit)) < 2:
+            v.fail(
+                f"提交 {commit[:7]} 不是 merge —— stack 只接收 merge,"
+                "提交要打在 layer/<层> 上"
+            )
             return v
-        if tag:
-            for p in git.changed_paths(commit):
-                table.setdefault(p.casefold(), (tag, p))
+        # merge 节点的内容已经在权威分支那一侧验过了,这里不重复。
     return v
 
 

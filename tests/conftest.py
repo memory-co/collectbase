@@ -53,7 +53,22 @@ class Repo:
             p.write_bytes(data)
         return p
 
-    def commit(self, message: str, *paths: str, no_verify: bool = False):
+    def on(self, layer: str) -> "Repo":
+        """切到某条权威分支 —— 提交打在那里。"""
+        self.sh("checkout", "-q", f"layer/{layer}")
+        return self
+
+    def commit(self, message: str, *paths: str, no_verify: bool = False, stay: bool = False):
+        """提交打在权威分支上 —— 从 [层名] 推出该在哪条分支上。
+
+        ``stay=True`` 表示"就在当前分支上提交",给那些要验证分支/层名不符的
+        测试用。
+        """
+        from collectbase import layers as L
+
+        tag = None if stay else L.tag_of(message)
+        if tag and self.git.resolve(f"refs/heads/layer/{tag}"):
+            self.sh("checkout", "-q", f"layer/{tag}", check=False)
         self.sh("add", "-A", "--", *(paths or ["."]), check=False)
         args = ["commit", "-q", "-m", message]
         if no_verify:

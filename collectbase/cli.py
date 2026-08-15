@@ -64,7 +64,7 @@ def _init(git: Git, spec: str) -> int:
     layers = L.Layers(tuple(names))
     if not plan.created and not plan.adopted:
         print("已初始化过。补上本地配置(core.hooksPath 不随 clone 传播),并切到写入面。")
-        print("  合并视图  stack")
+        print(f"  已切到 layer/{layers.bottom}")
         return EXIT_OK
 
     print(f"始祖提交  {plan.start_point[:7]}  [{layers.bottom}] collectbase: init")
@@ -72,14 +72,14 @@ def _init(git: Git, spec: str) -> int:
     print()
     for name in layers.names:
         print(f"  layer/{name:<12} → {plan.start_point[:7]}")
-    print(f"  {'stack':<18} → {plan.start_point[:7]}  ← 合并视图(已切过去)")
+    print(f"  {'stack':<18} → {plan.start_point[:7]}  ← 合并视图,只接收 merge")
     print()
     print("  所有分支都指向始祖那一个提交。共同祖先在那儿,merge 的基就有了:")
     print("  各层此后各加各的文件,git 算并集时那些老文件是基,不会撞。")
     print()
     print(f"hook 已装,core.hooksPath = {git.text('config', 'core.hooksPath')}")
     print(f"提交时以 {' / '.join('[%s]' % n for n in layers.names)} 开头声明所属层。")
-    print("在 stack 上提交(看得见所有层)或直接在 layer/<层> 上提交,hook 都会归位。")
+    print(f"提交打在权威分支上(已切到 layer/{layers.bottom});stack 只接收 merge,SHA 原样带过去。")
     return EXIT_OK
 
 

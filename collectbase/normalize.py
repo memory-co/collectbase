@@ -7,9 +7,14 @@
 
 两个入口都行,hook 负责把它清理干净:
 
-* 在 ``layer/<L>`` 上提交 —— 本来就是权威的,merge 进 stack 就完了
-* 在 ``stack`` 上提交 —— 那个提交不是权威的,把属于声明层的子集拆出来提交到
-  ``layer/<L>``,再把 stack 改写成本该在那儿的那个 merge 节点
+**提交只能打在 ``layer/<L>`` 上。**两条要求放一起就把答案逼死了:层分支只放
+这一层的内容(树 ≠ stack 的树),而提交的 SHA 必须原封不动地成为权威提交。
+在 stack 上提交的话,那个对象的树里带着所有层,搬到层分支就必然产生新对象
+——那是 cherry-pick,SHA 就变了。
+
+所以 ``stack`` **只接收 merge**:它每前进一步,都是把某条层分支的那个提交
+(原样、同一个 SHA)merge 进来,信息逐字复制。``git merge-base --is-ancestor
+<你那个提交> stack`` 恒为真。
 
 见 docs/v2/DESIGN.md §6。
 """
@@ -68,52 +73,17 @@ def union_tree(git: Git, layers: L.Layers) -> str:
 # -------------------------------------------------------------------- 归位
 
 def run(git: Git, layers: L.Layers | None = None) -> Result:
-    """把一切放回它该在的位置。幂等,想跑几次跑几次。"""
+    """把每条层分支的新提交 merge 进 stack。幂等,想跑几次跑几次。"""
     layers = layers or L.read(git)
     if layers is None:
         return Result([])
-
-    extracted = None
-    if git.head_ref() == layers.stack_ref:
-        try:
-            extracted = _extract(git, layers)
-        except NormalizeError as exc:
-            return Result([], reason=str(exc))
+    here = git.head_ref()
+    prefer = here.rsplit("/", 1)[1] if here and here.startswith("refs/heads/layer/") else None
+    prefer_tip = git.resolve(layers.layer_ref(prefer)) if prefer and prefer in layers else None
     try:
-        return _merge_pending(git, layers, extracted)
+        return _merge_pending(git, layers, prefer_tip)
     except NormalizeError as exc:
-        return Result([], extracted=extracted, reason=str(exc))
-
-
-def _extract(git: Git, layers: L.Layers) -> str | None:
-    """把落在 stack 上的那次改动搬到它的权威层分支上。
-
-    人会在 stack 上提交,因为**只有那个工作区同时看得见所有层**。但那个提交
-    不是权威的,所以要把**这一次改动**应用到 ``layer/<L>`` 上——一个提交只能
-    属于一层(守卫保证),所以它的 diff 本来就只碰那一层的路径,搬过去就是
-    一次 cherry-pick,由 git 算。然后 stack 退回提交前,让 merge 节点顶上去。
-    """
-    tip = git.resolve("HEAD")
-    if tip is None or len(git.parents(tip)) != 1:
-        return None  # 根提交或已经是 merge —— 没什么可拆的
-
-    tag = L.tag_of(git.subject(tip))
-    if tag is None or tag not in layers:
-        raise NormalizeError(f"提交 {tip[:7]} 没有合法的 [层名],无法归位")
-
-    layer_ref = layers.layer_ref(tag)
-    layer_tip = git.resolve(layer_ref)
-
-    tree = git.apply_onto(tip, layer_ref) if layer_tip else git.text("rev-parse", f"{tip}^{{tree}}")
-
-    if layer_tip is not None and git.text("rev-parse", f"{layer_tip}^{{tree}}") == tree:
-        new_layer = layer_tip  # 内容没变(比如只改了别层的东西)
-    else:
-        new_layer = git.commit_tree(tree, [layer_tip] if layer_tip else [], git.message(tip))
-        git.update_ref(layer_ref, new_layer, reason=f"collectbase: extract → {tag}")
-
-    git.update_ref(layers.stack_ref, git.parents(tip)[0], reason="collectbase: normalise")
-    return new_layer
+        return Result([], reason=str(exc))
 
 
 def _merge_pending(git: Git, layers: L.Layers, prefer: str | None) -> Result:
