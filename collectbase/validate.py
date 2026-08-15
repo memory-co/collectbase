@@ -35,12 +35,18 @@ def owners(git: Git, layers: L.Layers) -> dict[str, tuple[str, str]]:
     折叠大小写:在大小写不敏感的文件系统上 ``Facts/a.md`` 和 ``facts/a.md``
     是两个 git 路径、同一个磁盘文件。
     """
+    base = L.start_point(git)
+    base_paths = {e.path for e in git.ls_tree(base)} if base else set()
     table: dict[str, tuple[str, str]] = {}
+    for p in base_paths:
+        table[p.casefold()] = (layers.bottom, p)  # 始祖里的东西是共同的基,归最底层
     for name in layers:
         ref = layers.layer_ref(name)
         if git.resolve(ref) is None:
             continue
         for e in git.ls_tree(ref):
+            if e.path in base_paths:
+                continue
             table[e.path.casefold()] = (name, e.path)
     return table
 

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from . import layers as L
 from .gitrepo import Entry, Git
+from .validate import owners
 
 
 class NormalizeError(RuntimeError):
@@ -39,35 +40,30 @@ class Result:
 
 # ------------------------------------------------------------------ 树运算
 
-def union_tree(git: Git, layers: L.Layers) -> str:
-    """各层 tip 的不相交并集。
+def merge_tree(git: Git, a: str, b: str) -> str:
+    """两条分支的合并树,由 **git 自己算**。
 
-    ``update-index`` 遇到重复路径是后者静默覆盖前者,所以必须自己查——好处是
-    错误信息由我们写,能说清"这个路径归 facts,换一个"。
+    各层都从始祖出发,此后各加各的文件,所以三方合并的两侧改动不相交,永不
+    冲突。冲突意味着 I1 被破坏了——那不是待处理的日常,是损坏信号。
     """
-    entries: list[Entry] = []
-    seen: dict[str, str] = {}
-    for name in layers:
-        ref = layers.layer_ref(name)
-        if git.resolve(ref) is None:
-            continue
-        for e in git.ls_tree(ref):
-            prev = seen.get(e.path)
-            if prev is not None:
-                raise NormalizeError(f"路径 {e.path} 同时属于层 [{prev}] 和 [{name}]")
-            seen[e.path] = name
-            entries.append(e)
-    return git.write_tree(entries)
+    out = git.run("merge-tree", "--write-tree", a, b, check=False)
+    tree = out.decode(errors="replace").strip().splitlines()
+    if not tree or len(tree[0]) != 40:
+        raise NormalizeError(f"合并 {a[:7]} 与 {b[:7]} 冲突了 —— 说明有路径同时属于两层")
+    return tree[0]
 
 
-def own_paths(git: Git, layers: L.Layers, layer: str, commit: str) -> set[str]:
-    """把 ``commit`` 算进去之后,属于 ``layer`` 的路径集合。"""
-    ref = layers.layer_ref(layer)
-    own = {e.path for e in git.ls_tree(ref)} if git.resolve(ref) else set()
-    present = {e.path for e in git.ls_tree(commit)}
-    for p in git.changed_paths(commit):
-        (own.add if p in present else own.discard)(p)
-    return own
+def union_tree(git: Git, layers: L.Layers) -> str:
+    """各层的合并树。只有 ``cb rebuild`` 用得上——日常路径是 git 的 merge。"""
+    tips = [t for t in (git.resolve(layers.layer_ref(n)) for n in layers) if t]
+    if not tips:
+        raise NormalizeError("一条层分支都没有")
+    tree = git.text("rev-parse", f"{tips[0]}^{{tree}}")
+    acc = tips[0]
+    for tip in tips[1:]:
+        tree = merge_tree(git, acc, tip)
+        acc = git.commit_tree(tree, [acc, tip], "[cb] tmp")
+    return tree
 
 
 # -------------------------------------------------------------------- 归位
@@ -107,8 +103,25 @@ def _extract(git: Git, layers: L.Layers) -> str | None:
 
     layer_ref = layers.layer_ref(tag)
     layer_tip = git.resolve(layer_ref)
-    keep = own_paths(git, layers, tag, tip)
-    tree = git.write_tree([e for e in git.ls_tree(tip) if e.path in keep])
+
+    # 在层分支**现有的树**上,只应用属于本层的那几处改动。不能拿 stack 的树
+    # 过滤一遍就完事——各层都从始祖出发,那份共同的基还在每条层分支上,过滤
+    # 会把它整个删掉;而从 stack 里连基一起取,又会把别层刚改过的版本带进来,
+    # 下次 merge 时两侧就都"动过"了。
+    entries = {e.path: e for e in git.ls_tree(layer_ref)} if layer_tip else {}
+    incoming = {e.path: e for e in git.ls_tree(tip)}
+    # 归属按**改动之前**的状态判断:被删掉的路径改动之后已经不属于任何层了,
+    # 用改动之后的集合去筛,删除动作就永远落不下去。
+    table = owners(git, layers)
+    for path in git.changed_paths(tip):
+        hit = table.get(path.casefold())
+        if hit and hit[0] != tag:
+            continue  # 别层的,守卫已经拦过;这里是防御
+        if path in incoming:
+            entries[path] = incoming[path]
+        else:
+            entries.pop(path, None)
+    tree = git.write_tree(list(entries.values()))
 
     if layer_tip is not None and git.text("rev-parse", f"{layer_tip}^{{tree}}") == tree:
         new_layer = layer_tip  # 内容没变(比如只改了别层的东西)
@@ -140,7 +153,7 @@ def _merge_pending(git: Git, layers: L.Layers, prefer: str | None) -> Result:
         stack = git.resolve(layers.stack_ref)
         if stack is not None and git.is_ancestor(tip, stack):
             continue
-        tree = union_tree(git, layers)
+        tree = merge_tree(git, stack, tip) if stack else git.text("rev-parse", f"{tip}^{{tree}}")
         parents = [p for p in (stack, tip) if p]
         new = git.commit_tree(tree, parents, git.message(tip))
         git.update_ref(layers.stack_ref, new, reason=f"collectbase: merge {name}")
@@ -155,20 +168,22 @@ def reconcile(git: Git, layers: L.Layers) -> list[str]:
     ``layer/*`` 可能还没追平,拿它算出来的树是陈旧的。
     """
     notes: list[str] = []
+    base = L.start_point(git)
     for name in layers:
         ref = layers.layer_ref(name)
         if git.resolve(ref) is None:
-            oid = git.commit_tree(
-                git.empty_tree(), [], f"[{layers.bottom}] collectbase: init layer/{name}"
-            )
-            git.update_ref(ref, oid, reason="collectbase: new layer")
+            if base is None:
+                continue
+            # 新层也从始祖出发 —— 和 init 时一样,一条 ref 就位。
+            git.update_ref(ref, base, reason="collectbase: new layer")
             notes.append(f"建立 {ref[11:]}")
 
     for ref in git.branches("refs/heads/layer/**"):
         name = ref.rsplit("/", 1)[1]
         if name in layers:
             continue
-        if git.ls_tree(ref):
+        base_paths = {e.path for e in git.ls_tree(base)} if base else set()
+        if {e.path for e in git.ls_tree(ref)} - base_paths:
             raise NormalizeError(
                 f"layers 里去掉了 [{name}],但 {ref[11:]} 还有内容 —— 先清空它,或把这一层加回去"
             )

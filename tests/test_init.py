@@ -18,19 +18,18 @@ def test_既有历史原样成为事实层的历史(repo):
 
 
 def test_既有内容全部划归最底层(repo):
-    """其余层为空,于是 union(layer/*) == layer/facts,不变量当场成立。"""
+    """所有层都从始祖出发,此刻各层相对它都没有增量,不变量当场成立。"""
     assert "project/api.md" in repo.tree("refs/heads/layer/facts")
-    assert repo.tree("refs/heads/layer/notes") == []
-    assert repo.tree("refs/heads/layer/beliefs") == []
+    for name in ("facts", "notes", "beliefs"):
+        assert repo.own(f"refs/heads/layer/{name}") == []
     assert repo.tree("refs/heads/stack") == repo.tree("refs/heads/layer/facts")
 
 
-def test_起始点位被复用_未新建提交(repo):
-    """layer/<底层> 和 main 共享起始点位那一个提交;stack 是各层 tip 的 merge。"""
+def test_init_只造一个提交(repo):
+    """始祖就是写 layers 的那个提交,所有分支都指向它——没有孤儿,没有 merge。"""
     start = repo.sh("rev-parse", "refs/heads/main").stdout.strip()
-    assert repo.sh("rev-parse", "refs/heads/layer/facts").stdout.strip() == start
-    parents = repo.git.parents(repo.sh("rev-parse", "refs/heads/stack").stdout.strip())
-    assert start in parents and len(parents) == 3
+    for ref in ("layer/facts", "layer/notes", "layer/beliefs", "stack"):
+        assert repo.sh("rev-parse", f"refs/heads/{ref}").stdout.strip() == start
 
 
 def test_起始点位是首次引入锚定的提交(repo):

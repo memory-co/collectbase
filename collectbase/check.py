@@ -48,14 +48,19 @@ def run(git: Git) -> Report:
 
 
 def _disjoint(git: Git, layers: L.Layers) -> Finding:
+    """相对始祖算:那份共同的基在每条层分支上都有,它按定义归最底层。"""
+    base = L.start_point(git)
+    base_paths = {e.path for e in git.ls_tree(base)} if base else set()
     seen: dict[str, str] = {}
     clashes: list[str] = []
-    total = 0
+    total = len(base_paths)
     for name in layers:
         ref = layers.layer_ref(name)
         if git.resolve(ref) is None:
             continue
         for e in git.ls_tree(ref):
+            if e.path in base_paths:
+                continue
             total += 1
             prev = seen.get(e.path.casefold())
             if prev:

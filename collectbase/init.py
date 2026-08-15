@@ -79,31 +79,21 @@ def run(git: Git, names: list[str]) -> Plan:
     start = git.resolve("HEAD")
     assert start
 
+    # ④ 所有层分支都从**始祖提交**出发。
+    #    共同祖先在那儿,merge 的基就有了:各层此后各加各的文件,是相对这个
+    #    基的不相交改动,git 算并集时老文件是基而不是重复,不会撞。
+    #    不需要孤儿分支,也不需要 octopus merge。
     created, reused = [], []
-    # ④ layer/<底层> 直接复用起始点位:既有历史原样成为事实层的历史
-    git.update_ref(layers.layer_ref(layers.bottom), start, reason="collectbase: init")
-    reused.append(layers.layer_ref(layers.bottom))
+    for name in layers:
+        git.update_ref(layers.layer_ref(name), start, reason="collectbase: init")
+        reused.append(layers.layer_ref(name))
+    git.update_ref(layers.stack_ref, start, reason="collectbase: init")
+    reused.append(layers.stack_ref)
 
-    # ⑤ 其余各层是空树孤儿提交
-    empty = git.empty_tree()
-    for name in layers.names[1:]:
-        oid = git.commit_tree(empty, [], f"[{layers.bottom}] collectbase: init layer/{name}")
-        git.update_ref(layers.layer_ref(name), oid, reason="collectbase: init")
-        created.append(layers.layer_ref(name))
-
-    # ⑥ stack 是各层 tip 的 merge。此刻并集树 == 底层树,但仍要建这个节点,
-    #    否则那几条空的层分支不是 stack 的祖先,下一次归位会把它们当成"待
-    #    merge",拿 init 的消息盖掉真正的提交。
-    tips = [git.resolve(layers.layer_ref(n)) for n in layers]
-    stack = git.commit_tree(start + "^{tree}" and git.text("rev-parse", f"{start}^{{tree}}"),
-                            [t for t in tips if t], f"[{layers.bottom}] collectbase: init stack")
-    git.update_ref(layers.stack_ref, stack, reason="collectbase: init")
-    created.append(layers.stack_ref)
-
-    # ⑦ 装 hook —— 必须最后做,否则 reference-transaction 会拦住上面的 update-ref
+    # ⑤ 装 hook —— 必须最后做,否则 reference-transaction 会拦住上面的 update-ref
     _write_hooks(git)
 
-    # ⑧ 切到 stack 并上锁
+    # ⑥ 切到 stack 并上锁
     git.run("checkout", "-q", "stack")
 
     return Plan(start, created, reused, adopted)

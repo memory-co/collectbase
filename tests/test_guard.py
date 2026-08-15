@@ -128,7 +128,7 @@ def test_加一层就是改锚定(repo):
 
     repo.write("project/x.md", "x\n")
     assert repo.commit("[extra] 用上新层").returncode == 0
-    assert repo.tree("refs/heads/layer/extra") == ["project/x.md"]
+    assert repo.own("refs/heads/layer/extra") == ["project/x.md"]
 
 
 # ------------------------------------------------------- 不受管的分支不挡

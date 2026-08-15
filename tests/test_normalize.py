@@ -29,19 +29,19 @@ def layers(repo) -> L.Layers:
 
 # --------------------------------------------------- 在 stack 上提交(主路径)
 
-def test_权威层只含自己的文件(repo):
+def test_权威层只含自己的东西(repo):
+    """各层都从始祖出发,所以"这一层的东西"= 相对始祖的增量。"""
     scenario(repo)
-    assert repo.tree("refs/heads/layer/notes") == ["project/api-notes.md"]
-    assert repo.tree("refs/heads/layer/beliefs") == ["project/why-it-broke.md"]
-    facts = repo.tree("refs/heads/layer/facts")
-    assert "project/api.md" in facts and "project/api-notes.md" not in facts
+    assert repo.own("refs/heads/layer/notes") == ["project/api-notes.md"]
+    assert repo.own("refs/heads/layer/beliefs") == ["project/why-it-broke.md"]
+    assert repo.own("refs/heads/layer/facts") == ["project/log/2026-08-15.jsonl"]
 
 
 def test_布局可以交错(repo):
     """分层的价值就在于上层能把文件放在下层的文件旁边。"""
     scenario(repo)
     assert "project/api.md" in repo.tree("refs/heads/layer/facts")
-    assert "project/api-notes.md" in repo.tree("refs/heads/layer/notes")
+    assert "project/api-notes.md" in repo.own("refs/heads/layer/notes")
 
 
 def test_stack_上每次改动只有一个节点_而且是_merge(repo):
@@ -97,7 +97,7 @@ def test_在权威分支上提交也会被_merge_进来(repo):
     repo.write("note.md", "直接写在权威分支上\n")
     assert repo.commit("[notes] 直接提交").returncode == 0
 
-    assert repo.tree("refs/heads/layer/notes") == ["note.md"]
+    assert repo.own("refs/heads/layer/notes") == ["note.md"]
     assert repo.subject("refs/heads/stack") == "[notes] 直接提交"
     assert "note.md" in repo.tree("refs/heads/stack")
     assert repo.sh(
@@ -125,7 +125,7 @@ def test_删自己层的文件是合法的(repo):
     scenario(repo)
     (repo.root / "project/why-it-broke.md").unlink()
     assert repo.commit("[beliefs] 收回这条结论").returncode == 0
-    assert repo.tree("refs/heads/layer/beliefs") == []
+    assert repo.own("refs/heads/layer/beliefs") == []
 
 
 def test_删下层的文件被拒(repo):

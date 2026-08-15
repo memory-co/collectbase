@@ -91,23 +91,20 @@ main:  … ── e4f1a2 ── [facts] collectbase: init      ← 起始点位
 
 提交信息带 `[facts]` 标签,让起始点位本身就符合规矩。
 
-**④ `layer/<底层>` 直接指向起始点位**,不新建提交。
-
-于是**仓库既有的全部历史,原样成为事实层的历史**。`git log layer/facts` 能看到 collectbase 接管之前发生过的一切。这是这个设计最省事的一处:不需要迁移,不需要重写,一条 ref 就位。
-
-**⑤ 其余各层建空树孤儿根提交。**
+**④ 所有分支都指向这个始祖提交。**
 
 ```sh
-empty=$(git hash-object -t tree /dev/null)
-git update-ref refs/heads/layer/notes   "$(git commit-tree $empty -m '[cb] init layer/notes')"
-git update-ref refs/heads/layer/beliefs "$(git commit-tree $empty -m '[cb] init layer/beliefs')"
+for L in facts notes beliefs; do git update-ref refs/heads/layer/$L "$start"; done
+git update-ref refs/heads/stack "$start"
 ```
 
-**⑥ `stack` 是各层 tip 的一次 merge。**
+**整个 init 只造了那一个提交**,其余全是 ref。没有孤儿分支,没有 merge 节点。
 
-`layer/facts` 与 `main` 指向**同一个提交**;`stack` 是各层 tip 的一次 merge(此刻并集树 == 底层树,但这个节点必须建,否则那几条空的层分支不是 stack 的祖先)。
+这么做成立的原因是:**共同祖先在那儿,merge 的基就有了。**各层此后各加各的文件,是相对这个基的不相交改动;git 算并集时,那份共同的基是**基**而不是"重复",不会撞。
 
-整个 init 只新建 **N-1 个空孤儿提交 + 一个 merge 节点**,其余全是 ref。
+顺带,**仓库既有的全部历史原样成为事实层的历史**——`git log layer/facts` 能看到 collectbase 接管之前发生过的一切。不需要迁移,不需要重写。
+
+代价是:`git checkout layer/notes` 看到的是**始祖 + notes 自己的文件**,而不是只有 notes 的文件。所以"这一层的东西"要理解成**相对始祖的增量**:`git diff --diff-filter=A <始祖> layer/notes`。归属判定也按这个来。
 
 **⑦ 装 hook —— 必须最后做。**
 

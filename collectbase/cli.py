@@ -67,13 +67,15 @@ def _init(git: Git, spec: str) -> int:
         print("  合并视图  stack")
         return EXIT_OK
 
-    print(f"起始点位  {plan.start_point[:7]}  [{layers.bottom}] collectbase: init")
+    print(f"始祖提交  {plan.start_point[:7]}  [{layers.bottom}] collectbase: init")
     print(f"既有 {plan.adopted} 个文件全部划归 [{layers.bottom}]")
     print()
-    print(f"  layer/{layers.bottom:<12} → {plan.start_point[:7]}   复用起始点位,既有历史即事实层历史")
-    for name in layers.names[1:]:
-        print(f"  layer/{name:<12} → 空树孤儿")
+    for name in layers.names:
+        print(f"  layer/{name:<12} → {plan.start_point[:7]}")
     print(f"  {'stack':<18} → {plan.start_point[:7]}  ← 合并视图(已切过去)")
+    print()
+    print("  所有分支都指向始祖那一个提交。共同祖先在那儿,merge 的基就有了:")
+    print("  各层此后各加各的文件,git 算并集时那些老文件是基,不会撞。")
     print()
     print(f"hook 已装,core.hooksPath = {git.text('config', 'core.hooksPath')}")
     print(f"提交时以 {' / '.join('[%s]' % n for n in layers.names)} 开头声明所属层。")

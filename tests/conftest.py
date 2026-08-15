@@ -70,6 +70,19 @@ class Repo:
     def head(self) -> str:
         return self.sh("rev-parse", "HEAD").stdout.strip()
 
+    def base(self) -> str:
+        """始祖提交:引入 layers 的那一个。所有层分支都从它出发。"""
+        from collectbase import layers as L
+
+        got = L.start_point(self.git)
+        assert got
+        return got
+
+    def own(self, ref: str) -> list[str]:
+        """某条层分支相对始祖新增的路径 —— 也就是"这一层自己的东西"。"""
+        out = self.sh("diff", "--name-only", "--diff-filter=A", self.base(), ref).stdout
+        return sorted(x for x in out.splitlines() if x)
+
 
 @pytest.fixture
 def bare_repo(tmp_path) -> Repo:
