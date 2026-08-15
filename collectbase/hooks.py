@@ -82,31 +82,19 @@ def commit_msg(argv: list[str]) -> int:
     here = _here(git, layers)
     if here is None:
         return 0  # 别人的分支,不关我们的事
-    if here == "stack":
-        _say(
-            "✗ 拒绝提交:stack 只接收 merge,提交要打在权威分支上。",
-            "",
-            "  层分支只放这一层的内容,而提交的 SHA 必须原封不动地成为权威提交。",
-            "  在 stack 上提交的话,那个对象带着所有层的内容,搬过去就得复制一份,",
-            "  SHA 就变了。所以:",
-            "",
-            f"      git checkout layer/<层>        # {' / '.join(layers.names)}",
-            "      git commit -m \"[<层>] …\"",
-            "",
-            "  本次提交未产生任何改动,工作区保持原样。",
-        )
-        return 1
-
     subject = ""
     if argv:
         text = Path(argv[0]).read_text().splitlines()
         subject = text[0] if text else ""
     tag = L.tag_of(subject)
 
-    if tag is not None and tag != here:
+    if here != "stack" and tag is not None and tag != here:
         _say(
             f"✗ 拒绝提交:你在 layer/{here} 上,却声明了 [{tag}]。",
-            f"  要么把信息改成 [{here}],要么切到 layer/{tag} 再提交。",
+            "",
+            f"  权威分支必须线性、只进不退,所以没法把它挪走。两条路:",
+            f"      git checkout layer/{tag}    然后重新提交",
+            f"      git checkout stack          在那里提交,声明哪层都行",
         )
         return 1
 

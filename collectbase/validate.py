@@ -157,13 +157,13 @@ def check_update(git: Git, ref: str, old: str, new: str, *, threshold: int | Non
 
 
 def _check_stack(git: Git, old: str, new: str, threshold: int | None) -> Verdict:
-    """stack 只接收 merge。
+    """stack 也设防,只是规则不同。
 
-    规则很短:新增的每个提交都必须是 **merge 节点**,而且带合法的 ``[层名]``
-    ——它的信息是从权威提交逐字复制来的,所以这条自然满足;不满足就说明那不是
-    归位产生的。内容不用重查,merge 进来的那个提交在权威分支那一侧已经验过。
+    每个新增提交都要带合法的 ``[层名]``。merge 节点的内容不重查(权威分支那侧
+    已经验过);单亲提交是"你站在 stack 上敲的那次草稿",post-commit 会把它落
+    到权威层再退回来,但内容照样要查——否则 ``--no-verify`` 就没人拦了。
 
-    不要求 fast-forward:``cb rebuild`` 会整条重造,它是构建产物。
+    不要求 fast-forward:草稿会被退回,``cb rebuild`` 更是整条重造。
     """
     v = Verdict()
     if new == ZERO or old == ZERO:
@@ -183,13 +183,20 @@ def _check_stack(git: Git, old: str, new: str, threshold: int | None) -> Verdict
             # 给自己发证。
             v.fail(f"提交 {commit[:7]}:未知的层 [{tag}];当前 layers = {', '.join(layers.names)}")
             return v
-        if len(git.parents(commit)) < 2:
-            v.fail(
-                f"提交 {commit[:7]} 不是 merge —— stack 只接收 merge,"
-                "提交要打在 layer/<层> 上"
-            )
+        if len(git.parents(commit)) >= 2:
+            continue  # merge 节点的内容已在权威分支那一侧验过
+        # 单亲提交 = 你在 stack 上敲的那次草稿,post-commit 会把它落到权威层
+        # 再退回来。内容照样要查,否则 --no-verify 就没人拦了。
+        got = check_payload(
+            git, layers, tag,
+            git.changed_entries(commit),
+            git.changed_paths(commit),
+            owners(git, layers),
+            threshold=threshold,
+        )
+        if not got.ok:
+            v.errors += [f"提交 {commit[:7]}:{e}" for e in got.errors]
             return v
-        # merge 节点的内容已经在权威分支那一侧验过了,这里不重复。
     return v
 
 

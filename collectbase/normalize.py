@@ -34,7 +34,7 @@ class NormalizeError(RuntimeError):
 @dataclass
 class Result:
     merged: list[str]
-    extracted: str | None = None
+    landed: str | None = None
     reason: str | None = None
 
     @property
@@ -73,17 +73,56 @@ def union_tree(git: Git, layers: L.Layers) -> str:
 # -------------------------------------------------------------------- 归位
 
 def run(git: Git, layers: L.Layers | None = None) -> Result:
-    """把每条层分支的新提交 merge 进 stack。幂等,想跑几次跑几次。"""
+    """把这次改动落到它声明的那一层上,再 merge 进 stack。
+
+    **站在哪条分支上不影响结果。**提交信息里的 ``[层名]`` 说了算:
+    站在 ``layer/<L>`` 上时,你那个提交**就是**权威对象,SHA 原样;站在别处
+    时,你那个对象只是草稿,它从来不是权威的。两边的结果一样。
+
+    幂等,想跑几次跑几次。
+    """
     layers = layers or L.read(git)
     if layers is None:
         return Result([])
-    here = git.head_ref()
-    prefer = here.rsplit("/", 1)[1] if here and here.startswith("refs/heads/layer/") else None
-    prefer_tip = git.resolve(layers.layer_ref(prefer)) if prefer and prefer in layers else None
     try:
-        return _merge_pending(git, layers, prefer_tip)
+        landed = _land(git, layers)
     except NormalizeError as exc:
         return Result([], reason=str(exc))
+    try:
+        return _merge_pending(git, layers, landed)
+    except NormalizeError as exc:
+        return Result([], landed=landed, reason=str(exc))
+
+
+def _land(git: Git, layers: L.Layers) -> str | None:
+    """让这次改动落在 ``layer/<声明的层>`` 上,返回那个权威提交。"""
+    here = git.head_ref()
+    if here is None or here not in layers.managed_refs():
+        return None
+    tip = git.resolve("HEAD")
+    if tip is None or len(git.parents(tip)) != 1:
+        return None  # 根提交,或者已经是 merge —— 没什么要落的
+
+    tag = L.tag_of(git.subject(tip))
+    if tag is None or tag not in layers:
+        raise NormalizeError(f"提交 {tip[:7]} 没有合法的 [层名],不知道该落到哪一层")
+
+    layer_ref = layers.layer_ref(tag)
+    if here == layer_ref:
+        return tip  # 你就站在那一层 —— 你那个提交就是权威对象,SHA 原样
+
+    # 站在别处(stack,或别的层)。你那个对象带着别层的内容,不可能同时是这一
+    # 层的权威提交,所以在 layer/<L> 上重造一个:把这次改动应用上去,由 git
+    # 三方合并算。你那个草稿随后被丢掉——它从来不是权威的。
+    layer_tip = git.resolve(layer_ref)
+    tree = git.apply_onto(tip, layer_ref) if layer_tip else git.text("rev-parse", f"{tip}^{{tree}}")
+    if layer_tip is not None and git.text("rev-parse", f"{layer_tip}^{{tree}}") == tree:
+        landed = layer_tip
+    else:
+        landed = git.commit_tree(tree, [layer_tip] if layer_tip else [], git.message(tip))
+        git.update_ref(layer_ref, landed, reason=f"collectbase: land on {tag}")
+    git.update_ref(here, git.parents(tip)[0], reason="collectbase: 草稿退回")
+    return landed
 
 
 def _merge_pending(git: Git, layers: L.Layers, prefer: str | None) -> Result:
@@ -111,7 +150,7 @@ def _merge_pending(git: Git, layers: L.Layers, prefer: str | None) -> Result:
         new = git.commit_tree(tree, parents, git.message(tip))
         git.update_ref(layers.stack_ref, new, reason=f"collectbase: merge {name}")
         merged.append(name)
-    return Result(merged, extracted=prefer)
+    return Result(merged, landed=prefer)
 
 
 def reconcile(git: Git, layers: L.Layers) -> list[str]:

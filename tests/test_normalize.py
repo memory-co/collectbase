@@ -64,13 +64,28 @@ def test_权威提交的_SHA_原样进入_stack(repo):
     ).returncode == 0
 
 
-def test_在_stack_上提交被拒(repo):
+def test_站在哪条分支上结果都一样(repo):
+    """在 stack 上提交和在 layer/notes 上提交,落点完全相同。"""
     repo.sh("checkout", "-q", "stack")
-    repo.write("x.md", "x\n")
+    repo.write("project/a.md", "a\n")
     repo.sh("add", "-A")
-    out = repo.sh("commit", "-q", "-m", "[notes] 在 stack 上写", check=False)
+    assert repo.sh("commit", "-q", "-m", "[notes] 在 stack 上写", check=False).returncode == 0
+
+    assert "project/a.md" in repo.own("refs/heads/layer/notes")
+    assert repo.subject("refs/heads/layer/notes") == "[notes] 在 stack 上写"
+    assert repo.subject("refs/heads/stack") == "[notes] 在 stack 上写"
+    tip = repo.sh("rev-parse", "refs/heads/stack").stdout.strip()
+    assert len(repo.git.parents(tip)) == 2, "stack 的 tip 是 merge"
+    assert repo.sh("rev-parse", "refs/heads/layer/notes").stdout.strip() in repo.git.parents(tip)
+    assert repo.sh("status", "--porcelain").stdout.strip() == "", "工作区应当还是干净的"
+
+
+def test_站在别的层上声明别的层会被拒(repo):
+    """权威分支必须线性只进不退,没法把提交挪走;去 stack 上提交就行。"""
+    repo.on("notes").write("x.md", "x\n")
+    out = repo.commit("[beliefs] 层名对不上", stay=True)
     assert out.returncode != 0
-    assert "只接收 merge" in out.stderr
+    assert "却声明了 [beliefs]" in out.stderr
 
 
 def test_merge_节点的信息与权威提交逐字相同(repo):
@@ -110,14 +125,6 @@ def test_只看某一层的历史(repo):
 
 
 # --------------------------------------------------------------- 层名对不上
-
-def test_在权威分支上声明别的层会被拒(repo):
-    repo.sh("checkout", "-q", "layer/notes")
-    repo.write("x.md", "x\n")
-    out = repo.commit("[beliefs] 层名对不上", stay=True)
-    assert out.returncode != 0
-    assert "却声明了 [beliefs]" in out.stderr
-
 
 def test_事实层可写在自己的分支上(repo):
     repo.write("project/api.md", "改事实,在事实层上就是合法的\n")

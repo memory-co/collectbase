@@ -27,13 +27,13 @@ cb init --layers facts,notes,beliefs
 ## 用起来
 
 ```bash
+git checkout stack                  # 看得见所有层,声明哪层都行
+
 # 事实进来(人 / 采集脚本 / 外部同步)
-git checkout layer/facts
 cp ~/.claude/projects/…/session.jsonl project/log/2026-08-14.jsonl
 git add -A && git commit -m "[facts] 采集 8-14 会话"
 
 # 智能体上班
-git checkout layer/beliefs
 $EDITOR project/why-it-broke.md
 git add -A && git commit -m "[beliefs] 这次故障的根因判断"
 
@@ -42,7 +42,7 @@ $EDITOR project/api.md                    # → EACCES,当场失败
 git commit -am "[beliefs] 顺手修一下"      # → 拒绝:该路径属于层 [facts]
 ```
 
-**提交打在权威分支上**,`post-commit` 把它 merge 进 `stack` —— 原样,同一个 SHA。
+**站在哪条分支上结果都一样**:改动落到 `[层名]` 声明的那条权威分支上,再 merge 进 `stack`。站在 `layer/<L>` 上时,你那个提交**就是**权威对象,SHA 原样。
 
 提交信息必须以 `[层名]` 开头,声明这次改动属于哪一层。于是 `git log` 本身成了一份认知审计:
 
@@ -66,7 +66,7 @@ git log --oneline layer/beliefs     # 只有智能体自己干过的事
 
 ## 它做的四件事
 
-**分层**。权威是 `layer/*`,每条只放自己那一层的文件、线性、必须 FF。`stack` 是它们 merge 出来的视图,**只接收 merge**:每个 merge 节点挂着那次权威提交本身(同一个 SHA),信息逐字相同。
+**分层**。权威是 `layer/*`,每条只放自己那一层的文件、线性、必须 FF。`stack` 是它们 merge 出来的视图,每个 merge 节点挂着那次权威提交本身(同一个 SHA),信息逐字相同。
 
 **守卫**。`reference-transaction` 检查落进 ref 的**每个提交**,而不是"谁发起的这次更新"。所以 `--no-verify`、`merge`、`reset --hard`、`rebase`、`cherry-pick` 一个都绕不过去;而一个内容合规的 `cherry-pick` 自然放行,不需要为它开特例。
 
