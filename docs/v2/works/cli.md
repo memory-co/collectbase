@@ -155,7 +155,7 @@ $ cb init --layers facts,notes,beliefs
 
 collectbase 用 pip 分发,所以 hook 直接调 python,**不搞 `cb hook <name>` 这种转一道的东西**——用户打开 hook 文件应该一眼看懂发生了什么。
 
-`.collectbase/hooks/commit-msg`:
+`$GIT_DIR/cb-hooks/commit-msg`:
 
 ```python
 #!/usr/bin/env python3
@@ -164,7 +164,13 @@ from collectbase.hooks import commit_msg
 raise SystemExit(commit_msg(sys.argv[1:]))
 ```
 
-五个 hook,五个同构的小文件。它们由**最底层跟踪**,是仓库内容的一部分,clone 出来就在。
+五个 hook,五个同构的小文件,装在 **`.git/cb-hooks/`**,不被跟踪。
+
+### 为什么不跟踪 hook(实现时改掉的)
+
+初稿把 hook 放在 `.collectbase/hooks/` 并由最底层跟踪,理由是"随仓库走"。**实测发现这是个硬伤**:`layer/*` 和更短的 `stack/*` 的树里没有这些文件(它们只含自己层的内容),所以 `git checkout layer/notes` 会把整个 hook 目录从工作区删掉,`core.hooksPath` 指向不存在的路径 —— **所有守卫静默失效**,那时往派生分支提交能直接成功。
+
+而"随仓库走"这个好处本来也是假的:`core.hooksPath` 是本地配置,从来不随 clone 传播,`cb init` 每个 clone 都得跑一次。既然如此,那一刻直接把 hook 写进 `.git/cb-hooks/` 就行 —— 不在工作区里,任何 checkout 都动不到它。
 
 | hook | 干什么 | 出处 |
 |---|---|---|

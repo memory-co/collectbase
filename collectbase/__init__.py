@@ -1,113 +1,20 @@
-"""collectbase — the ingestion boundary.
+"""collectbase — 分层记录文件系统,层即 git 分支。
 
-Collect raw sessions from many sources, normalize each into the standard
-session format, and push them into a memory system. See DESIGN.md and
-docs/v1/.
+给智能体一块它够不着的地板:事实放最底层,只读;推论放上层,随便改。
+层与层之间路径不相交,所以没有覆盖、没有遮蔽、没有冲突。
 
-Typical use:
+对外接口是 git —— `git checkout` / `git commit` / `git log`。这个包提供的
+是让 git 表现出分层语义的那套东西:分支拓扑 + hook。
 
-    from collectbase import Collectbase, HttpSink
-    from collectbase.workers import ClaudeCodeWorker
+**库是产品,hook 只是入口之一。** server 走 plumbing,一个 hook 都不触发,
+所以规则不能只活在 hook 脚本里;两份实现迟早不一致,而不一致的表现是仓库
+拒绝一切提交。
 
-    cb = await Collectbase.open(
-        checkpoint_dir="./collect",
-        sink=HttpSink("http://memory-host:8000", api_key="…"),
-        workers=[ClaudeCodeWorker()],
-    )
-    await cb.start()
-    ...
-    await cb.close()
+设计见 docs/v2/。
 """
-from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable
+from .gitrepo import Git
+from .layers import Layers, read as read_layers
 
-from .checkpoint import CheckpointStore
-from .engine import Engine
-from .format import (
-    Block,
-    Code,
-    ContentBlock,
-    Probe,
-    Round,
-    RoundInput,
-    SourceProbe,
-    Text,
-    Thinking,
-    ToolResult,
-    ToolUse,
-)
-from .sink import HttpSink, InProcessSink, Sink
-from .worker import FileWorker, JsonlWorker, PollWorker, Worker, register
-
-__all__ = [
-    "Collectbase",
-    # format / builders
-    "Round",
-    "Text",
-    "Thinking",
-    "Code",
-    "ToolUse",
-    "ToolResult",
-    "Block",
-    "ContentBlock",
-    "RoundInput",
-    "Probe",
-    "SourceProbe",
-    # worker bases
-    "Worker",
-    "FileWorker",
-    "JsonlWorker",
-    "PollWorker",
-    "register",
-    # sink
-    "Sink",
-    "HttpSink",
-    "InProcessSink",
-    # internals
-    "Engine",
-    "CheckpointStore",
-]
-
-
-class Collectbase:
-    """Facade tying an engine, a sink, and a checkpoint store together."""
-
-    def __init__(self, engine: Engine, checkpoints: CheckpointStore):
-        self.engine = engine
-        self.checkpoints = checkpoints
-
-    @classmethod
-    async def open(
-        cls,
-        checkpoint_dir: str | Path,
-        sink: Sink,
-        workers: Iterable[Worker],
-        *,
-        debounce_ms: int = 200,
-    ) -> "Collectbase":
-        db_path = Path(checkpoint_dir).expanduser() / "sync.db"
-        checkpoints = await CheckpointStore.open(db_path)
-        engine = Engine(workers, sink, checkpoints, debounce_ms=debounce_ms)
-        return cls(engine, checkpoints)
-
-    async def start(self) -> dict:
-        return await self.engine.start()
-
-    async def stop(self) -> None:
-        await self.engine.stop()
-
-    async def close(self) -> None:
-        await self.engine.stop()
-        await self.checkpoints.close()
-        # Close the sink's transport if it owns one (e.g. HttpSink's
-        # httpx client). Sinks without an aclose (InProcessSink) are no-ops.
-        aclose = getattr(self.engine.sink, "aclose", None)
-        if aclose is not None:
-            await aclose()
-
-    async def status(self) -> dict:
-        s = self.engine.status()
-        s["checkpoints"] = await self.checkpoints.count()
-        return s
+__all__ = ["Git", "Layers", "read_layers", "__version__"]
+__version__ = "0.2.0"

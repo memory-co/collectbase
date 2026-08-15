@@ -38,11 +38,13 @@ git cat-file -s HEAD:project/log/screen.png
 
 ## 1. 判据:`file --mime-encoding`
 
-**规则:`file -b --mime-encoding` 返回 `binary` 的,入库。** 两条例外。
+**规则:头 8 KB 里有 NUL 字节的,入库。** 两条例外。
+
+判据实现在 `collectbase.blob.is_binary`,**纯 Python,不 shell out 到 `file(1)`**——git hook 里少一个外部依赖。它与 `file -b --mime-encoding` 在整个语料上逐项吻合(见下表),而"两边必须是同一份实现"这条约束比"用哪个判据"重要得多。
 
 最初的想法是"非 `text/plain` 的都入库",实测证明这条会把事实层拆了:
 
-| 文件 | `--mime-type` | `--mime-encoding` | 规则 A(非 text/plain) | **规则 B(encoding)** |
+| 文件 | `--mime-type` | `--mime-encoding` | 规则 A(非 text/plain) | **规则 B(= NUL 判据)** |
 |---|---|---|---|---|
 | `s.jsonl` | **`application/x-ndjson`** | `us-ascii` | ❌ 入库 | ✅ 留 |
 | `s.json` | `application/json` | `us-ascii` | ❌ 入库 | ✅ 留 |
@@ -168,6 +170,14 @@ blob/2026/07/23/f1a4f24756ad…f801ac.png
 - **软链必须是相对路径且不逃逸出 `blob/`**——见下面的白名单。
 - **日期分片**:让 `blob/` 本身能当媒体库浏览,这是这个设计相对 LFS 的主要卖点。日期取**添加时刻**。
 - **保留扩展名**:直接进 `blob/` 翻找时,图片浏览器、缩略图工具认得出来。软链那头本来就有扩展名,所以这一条纯粹是为了"库能看"。
+
+### `blob/` 必须被 gitignore
+
+实现时踩到的:`blob/` 若没进 `.gitignore`,`git add -A` 会把库里的文件本身暂存进来,`pre-commit` 判定它们是二进制、再转一次,结果是**一条指向自己的软链**。`cb init` 因此负责写 `.gitignore`,守卫也直接拒绝任何落在 `blob/` 里的跟踪路径——那是存储,不是内容。
+
+### 换一个已入库的文件:先删软链
+
+工作区里那个路径是指向 444 blob 的软链,**直接写会穿过软链撞上只读位**,报一个看着莫名其妙的 EACCES。换内容要先 `rm` 掉软链再写新文件。
 
 ### 跨天重复的代价
 
