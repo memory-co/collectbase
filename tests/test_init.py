@@ -9,11 +9,12 @@ from collectbase.gitrepo import Git
 
 
 def test_既有历史原样成为事实层的历史(repo):
-    """不迁移、不重写,一条 ref 就位。"""
-    assert repo.sh("rev-parse", "refs/heads/layer/facts").stdout.strip() == \
-        repo.sh("rev-parse", "refs/heads/stack/beliefs").stdout.strip()
+    """不迁移、不重写,一条 ref 就位:layer/facts 直接指向起始点位。"""
     log = repo.sh("log", "--format=%s", "refs/heads/layer/facts").stdout.splitlines()
     assert "pre-existing work" in log
+    assert repo.sh(
+        "merge-base", "--is-ancestor", "refs/heads/layer/facts", "refs/heads/stack", check=False
+    ).returncode == 0
 
 
 def test_既有内容全部划归最底层(repo):
@@ -21,14 +22,15 @@ def test_既有内容全部划归最底层(repo):
     assert "project/api.md" in repo.tree("refs/heads/layer/facts")
     assert repo.tree("refs/heads/layer/notes") == []
     assert repo.tree("refs/heads/layer/beliefs") == []
-    assert repo.tree("refs/heads/stack/beliefs") == repo.tree("refs/heads/layer/facts")
+    assert repo.tree("refs/heads/stack") == repo.tree("refs/heads/layer/facts")
 
 
-def test_只新建_N减1_个提交(repo):
-    """stack/* 与 layer/<底层> 共享同一个提交,不需要额外对象。"""
-    start = repo.sh("rev-parse", "refs/heads/layer/facts").stdout.strip()
-    for ref in ("refs/heads/stack/notes", "refs/heads/stack/beliefs", "refs/heads/main"):
-        assert repo.sh("rev-parse", ref).stdout.strip() == start
+def test_起始点位被复用_未新建提交(repo):
+    """layer/<底层> 和 main 共享起始点位那一个提交;stack 是各层 tip 的 merge。"""
+    start = repo.sh("rev-parse", "refs/heads/main").stdout.strip()
+    assert repo.sh("rev-parse", "refs/heads/layer/facts").stdout.strip() == start
+    parents = repo.git.parents(repo.sh("rev-parse", "refs/heads/stack").stdout.strip())
+    assert start in parents and len(parents) == 3
 
 
 def test_起始点位是首次引入锚定的提交(repo):
@@ -40,12 +42,12 @@ def test_起始点位是首次引入锚定的提交(repo):
 
 def test_起始点位之前的历史不受约束(repo):
     """那条 'pre-existing work' 没有层标签,照样留在历史里。"""
-    subjects = repo.sh("log", "--format=%s", "refs/heads/stack/beliefs").stdout.splitlines()
+    subjects = repo.sh("log", "--format=%s", "refs/heads/stack").stdout.splitlines()
     assert "pre-existing work" in subjects
 
 
 def test_切到了写入面并装好了钩子(repo):
-    assert repo.sh("symbolic-ref", "HEAD").stdout.strip() == "refs/heads/stack/beliefs"
+    assert repo.sh("symbolic-ref", "HEAD").stdout.strip() == "refs/heads/stack"
     hooks_dir = repo.root / ".git" / "cb-hooks"
     assert repo.sh("config", "core.hooksPath").stdout.strip() == str(hooks_dir)
     for name in init_mod.HOOK_NAMES:
@@ -53,18 +55,18 @@ def test_切到了写入面并装好了钩子(repo):
 
 
 def test_钩子不在工作区里(repo):
-    """钩子若被跟踪,checkout 到派生分支(空树)就会把它们删掉,守卫随之全部
-    失效——实测过,那时提交能直接落进 layer/*。"""
+    """钩子若被跟踪,checkout 到某条权威分支(树里没有它们)就会把它们从工作区
+    删掉,守卫随之全部失效——实测过,那时什么都拦不住。"""
     assert not (repo.root / ".collectbase" / "hooks").exists()
     repo.sh("checkout", "-q", "layer/notes")
     assert (repo.root / ".git" / "cb-hooks" / "commit-msg").exists()
     repo.write("hand.md", "x\n")
-    out = repo.commit("[notes] 手动往派生分支提交")
-    assert out.returncode != 0
+    out = repo.commit("[beliefs] 层名对不上")
+    assert out.returncode != 0, "钩子还在,层名不符要被拒"
 
 
 def test_下层文件被设成只读(repo):
-    repo.sh("checkout", "-q", "stack/beliefs")
+    repo.sh("checkout", "-q", "stack")
     from collectbase import hooks
     import os
 

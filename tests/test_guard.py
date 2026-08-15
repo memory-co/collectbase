@@ -12,7 +12,7 @@ import pytest
 
 
 def face(repo) -> str:
-    return repo.sh("rev-parse", "refs/heads/stack/beliefs").stdout.strip()
+    return repo.sh("rev-parse", "refs/heads/layer/notes").stdout.strip()
 
 
 # ----------------------------------------------------------------- 正常路径
@@ -64,7 +64,7 @@ def scratch(repo):
     repo.write("project/good.md", "good\n")
     repo.commit("[notes] 一个合规的提交", no_verify=True)
     tagged = repo.head()
-    repo.sh("checkout", "-q", "stack/beliefs")
+    repo.sh("checkout", "-q", "stack")
     return untagged, tagged
 
 
@@ -119,22 +119,15 @@ def test_同一提交里加层并使用该层被拒(repo):
     assert "未知的层" in out.stderr
 
 
-def test_加一层就是改锚定_写入面随之上移(repo):
-    """加层不需要专门的命令:锚定是普通路径,改它就是加层。"""
+def test_加一层就是改锚定(repo):
+    """加层不需要专门的命令:锚定是普通路径,改它就是加层。
+    stack 的名字是固定的,所以加层不用切分支。"""
     repo.write("layers", "- facts\n- notes\n- beliefs\n- extra\n")
     assert repo.commit("[facts] 增加一层 extra").returncode == 0
-
     assert repo.sh("rev-parse", "refs/heads/layer/extra", check=False).returncode == 0
-    assert repo.sh("rev-parse", "refs/heads/stack/extra", check=False).returncode == 0
 
-    # 写入面上移了,旧的那条成了派生分支
     repo.write("project/x.md", "x\n")
-    out = repo.commit("[extra] 在旧写入面上写")
-    assert out.returncode != 0 and "派生分支" in out.stderr
-
-    repo.sh("checkout", "-q", "-f", "stack/extra")
-    repo.write("project/x.md", "x\n")
-    assert repo.commit("[extra] 现在合法了").returncode == 0
+    assert repo.commit("[extra] 用上新层").returncode == 0
     assert repo.tree("refs/heads/layer/extra") == ["project/x.md"]
 
 

@@ -22,7 +22,6 @@ CONFIG = ".collectbase/config.yaml"
 # And `core.hooksPath` is local config that never travels anyway, so `cb init`
 # has to run in each clone regardless; it may as well write the hooks then.
 HOOK_DIR = "cb-hooks"
-PROJECTED_REF = "refs/collectbase/projected"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
@@ -78,35 +77,21 @@ class Layers:
     # ------------------------------------------------------------------ 分支
 
     def layer_ref(self, name: str) -> str:
+        """The authoritative branch for one layer. Only its own files live here,
+        and it is the only thing the guard protects."""
         return f"refs/heads/layer/{name}"
 
-    def stack_ref(self, name: str) -> str:
-        return f"refs/heads/stack/{name}"
-
     @property
-    def write_face(self) -> str:
-        return self.stack_ref(self.top)
+    def stack_ref(self) -> str:
+        """The combined view. A fixed name on purpose: adding a layer must not
+        move it, or every writer would have to re-checkout."""
+        return "refs/heads/stack"
 
-    @property
-    def stack_names(self) -> tuple[str, ...]:
-        """Stacks that actually get a branch — the bottom needs none, since
-        ``stack/<bottom>`` would be identical to ``layer/<bottom>``."""
-        return self.names[1:]
-
-    def prefix(self, name: str) -> tuple[str, ...]:
-        """Layers from the bottom up to and including ``name``."""
-        return self.names[: self.index(name) + 1]
-
-    def stacks_containing(self, layer: str) -> tuple[str, ...]:
-        """Stack branches that must be recomputed when ``layer`` changes,
-        excluding the write face (it is where the commit already landed)."""
-        i = self.index(layer)
-        return tuple(n for n in self.names[max(i, 1) : -1])
+    def layer_refs(self) -> tuple[str, ...]:
+        return tuple(self.layer_ref(n) for n in self.names)
 
     def managed_refs(self) -> tuple[str, ...]:
-        return tuple(self.layer_ref(n) for n in self.names) + tuple(
-            self.stack_ref(n) for n in self.stack_names
-        )
+        return self.layer_refs() + (self.stack_ref,)
 
 
 TAG_RE = re.compile(r"^\[([a-z][a-z0-9_-]*)\]")
@@ -156,12 +141,10 @@ def read(git: Git) -> Layers | None:
 
 
 def _candidate_refs(git: Git):
-    # HEAD first: when you are standing on the write face, that is the newest
-    # anchor there is — including a layer you just added but have not projected
-    # yet. Everything else is a fallback for when HEAD is elsewhere.
+    # HEAD first: standing anywhere managed, that is the newest anchor there is
+    # — including a layer just added but not yet merged into stack.
     yield "HEAD"
-    for ref in git.branches("refs/heads/stack/**"):
-        yield ref
+    yield "refs/heads/stack"
     for ref in git.branches("refs/heads/layer/**"):
         yield ref
 

@@ -1,0 +1,189 @@
+"""归位:把每一次改动放到它的权威层分支上,再 merge 进 ``stack``。
+
+``layer/<name>`` 是**唯一的权威**——每条只放自己这一层的文件,线性、必须 FF。
+``stack`` 是**构建产物**:一串 merge,树是各层 tip 的并集,merge 节点的信息与
+权威提交逐字相同。它同样设防(每个提交都要带合法 ``[层名]``、内容过白名单),
+只是不要求 FF——归位时会改写它;真坏了重建即可,原料是权威分支。
+
+两个入口都行,hook 负责把它清理干净:
+
+* 在 ``layer/<L>`` 上提交 —— 本来就是权威的,merge 进 stack 就完了
+* 在 ``stack`` 上提交 —— 那个提交不是权威的,把属于声明层的子集拆出来提交到
+  ``layer/<L>``,再把 stack 改写成本该在那儿的那个 merge 节点
+
+见 docs/v2/DESIGN.md §6。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from . import layers as L
+from .gitrepo import Entry, Git
+
+
+class NormalizeError(RuntimeError):
+    pass
+
+
+@dataclass
+class Result:
+    merged: list[str]
+    extracted: str | None = None
+    reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.reason is None
+
+
+# ------------------------------------------------------------------ 树运算
+
+def union_tree(git: Git, layers: L.Layers) -> str:
+    """各层 tip 的不相交并集。
+
+    ``update-index`` 遇到重复路径是后者静默覆盖前者,所以必须自己查——好处是
+    错误信息由我们写,能说清"这个路径归 facts,换一个"。
+    """
+    entries: list[Entry] = []
+    seen: dict[str, str] = {}
+    for name in layers:
+        ref = layers.layer_ref(name)
+        if git.resolve(ref) is None:
+            continue
+        for e in git.ls_tree(ref):
+            prev = seen.get(e.path)
+            if prev is not None:
+                raise NormalizeError(f"路径 {e.path} 同时属于层 [{prev}] 和 [{name}]")
+            seen[e.path] = name
+            entries.append(e)
+    return git.write_tree(entries)
+
+
+def own_paths(git: Git, layers: L.Layers, layer: str, commit: str) -> set[str]:
+    """把 ``commit`` 算进去之后,属于 ``layer`` 的路径集合。"""
+    ref = layers.layer_ref(layer)
+    own = {e.path for e in git.ls_tree(ref)} if git.resolve(ref) else set()
+    present = {e.path for e in git.ls_tree(commit)}
+    for p in git.changed_paths(commit):
+        (own.add if p in present else own.discard)(p)
+    return own
+
+
+# -------------------------------------------------------------------- 归位
+
+def run(git: Git, layers: L.Layers | None = None) -> Result:
+    """把一切放回它该在的位置。幂等,想跑几次跑几次。"""
+    layers = layers or L.read(git)
+    if layers is None:
+        return Result([])
+
+    extracted = None
+    if git.head_ref() == layers.stack_ref:
+        try:
+            extracted = _extract(git, layers)
+        except NormalizeError as exc:
+            return Result([], reason=str(exc))
+    try:
+        return _merge_pending(git, layers, extracted)
+    except NormalizeError as exc:
+        return Result([], extracted=extracted, reason=str(exc))
+
+
+def _extract(git: Git, layers: L.Layers) -> str | None:
+    """把落在 stack 上的那个提交搬到权威层分支上。
+
+    人会在 stack 上提交,因为**只有这个工作区同时看得见所有层**。但那个提交
+    不是权威的,所以要拆开:属于声明层的子集变成 ``layer/<L>`` 上的一个提交,
+    stack 退回到提交前,好让 merge 节点顶上去。
+    """
+    tip = git.resolve("HEAD")
+    if tip is None or len(git.parents(tip)) != 1:
+        return None  # 根提交或已经是 merge —— 没什么可拆的
+
+    tag = L.tag_of(git.subject(tip))
+    if tag is None or tag not in layers:
+        raise NormalizeError(f"提交 {tip[:7]} 没有合法的 [层名],无法归位")
+
+    layer_ref = layers.layer_ref(tag)
+    layer_tip = git.resolve(layer_ref)
+    keep = own_paths(git, layers, tag, tip)
+    tree = git.write_tree([e for e in git.ls_tree(tip) if e.path in keep])
+
+    if layer_tip is not None and git.text("rev-parse", f"{layer_tip}^{{tree}}") == tree:
+        new_layer = layer_tip  # 内容没变(比如只改了别层的东西)
+    else:
+        new_layer = git.commit_tree(tree, [layer_tip] if layer_tip else [], git.message(tip))
+        git.update_ref(layer_ref, new_layer, reason=f"collectbase: extract → {tag}")
+
+    git.update_ref(layers.stack_ref, git.parents(tip)[0], reason="collectbase: normalise")
+    return new_layer
+
+
+def _merge_pending(git: Git, layers: L.Layers, prefer: str | None) -> Result:
+    """把 stack 还没追上的层 tip 逐个 merge 进来。
+
+    merge 节点的信息与权威提交**逐字相同**,所以 ``git log stack`` 读起来就是
+    那条时间线本身,不是一串 "Merge branch …"。
+    """
+    merged: list[str] = []
+    names = list(layers)
+    if prefer is not None:
+        # 刚归位的那一层**最后**merge —— stack 的 tip 消息才是这次真正的改动,
+        # 而不是某条顺带追上的空层分支。
+        names.sort(key=lambda n: git.resolve(layers.layer_ref(n)) == prefer)
+
+    for name in names:
+        tip = git.resolve(layers.layer_ref(name))
+        if tip is None:
+            continue
+        stack = git.resolve(layers.stack_ref)
+        if stack is not None and git.is_ancestor(tip, stack):
+            continue
+        tree = union_tree(git, layers)
+        parents = [p for p in (stack, tip) if p]
+        new = git.commit_tree(tree, parents, git.message(tip))
+        git.update_ref(layers.stack_ref, new, reason=f"collectbase: merge {name}")
+        merged.append(name)
+    return Result(merged, extracted=prefer)
+
+
+def reconcile(git: Git, layers: L.Layers) -> list[str]:
+    """按锚定调整分支集合。加一层就是往 ``layers`` 里加一行,没有专门的命令。
+
+    只给 ref 改指向、建空分支,**绝不推导树**——reconcile 跑在归位之前,那时
+    ``layer/*`` 可能还没追平,拿它算出来的树是陈旧的。
+    """
+    notes: list[str] = []
+    for name in layers:
+        ref = layers.layer_ref(name)
+        if git.resolve(ref) is None:
+            oid = git.commit_tree(
+                git.empty_tree(), [], f"[{layers.bottom}] collectbase: init layer/{name}"
+            )
+            git.update_ref(ref, oid, reason="collectbase: new layer")
+            notes.append(f"建立 {ref[11:]}")
+
+    for ref in git.branches("refs/heads/layer/**"):
+        name = ref.rsplit("/", 1)[1]
+        if name in layers:
+            continue
+        if git.ls_tree(ref):
+            raise NormalizeError(
+                f"layers 里去掉了 [{name}],但 {ref[11:]} 还有内容 —— 先清空它,或把这一层加回去"
+            )
+        git.delete_ref(ref)
+        notes.append(f"删除空层 {name}")
+    return notes
+
+
+def rebuild(git: Git, layers: L.Layers | None = None) -> str:
+    """从各层 tip 重建 stack。它是构建产物,这么做永远是安全的。"""
+    layers = layers or L.read(git)
+    if layers is None:
+        raise NormalizeError("仓库尚未初始化")
+    tree = union_tree(git, layers)
+    parents = [t for t in (git.resolve(layers.layer_ref(n)) for n in layers) if t]
+    new = git.commit_tree(tree, parents, f"[{layers.bottom}] collectbase: rebuild stack")
+    git.update_ref(layers.stack_ref, new, reason="collectbase: rebuild")
+    return new

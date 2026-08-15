@@ -10,7 +10,7 @@
 
 **本篇是立意 + 契约。**机制的推导过程、被否掉的方案、以及全部实测数据在子设计里:
 
-- [`works/branch-topology.md`](works/branch-topology.md) — **分支怎么组织**。单写入面、`[层名]` 声明、投影与重算、全仓库零 merge 节点。附两个被否方案及其实测。
+- [`works/branch-topology.md`](works/branch-topology.md) — **分支怎么组织**。权威在 `layer/*`、`stack` 由 merge 得到、`[层名]` 声明、两个入口如何归位。附三个被否方案及其实测。
 - [`works/blob-store.md`](works/blob-store.md) — **二进制怎么存**。`blob/` 外置 + 软链、`file --mime-encoding` 判据、钩子改写索引在四种提交方式下的行为、孤儿对象定点清除。
 - [`works/server.md`](works/server.md) — **`cb serve`**(可选)。一组路径上的 CRUD(网页是它的客户端)+ 把 blob 传到 S3 / OSS。它没有特权,写的每个提交都过同一道闸。
 - [`works/cli.md`](works/cli.md) — **锚定、init、hook、别的分支**。`layers` 文件如何成为唯一真相、`cb init` 在已有仓库上的八步、五个 hook 各干什么、以及别的分支为什么捅不进来(含 `reference-transaction` 的实测)。
@@ -22,13 +22,14 @@
 > **给智能体一块它够不着的地板。** 事实放最底层,只读;推论放上层,随便改。层与层之间**路径不相交**——上层永远碰不到下层已占的路径,所以没有覆盖、没有遮蔽、没有冲突,也就不需要任何合并策略。
 
 ```
-git checkout stack/beliefs   →   工作树 = facts ∪ notes ∪ beliefs    ← 唯一的写入面
-git checkout stack/notes     →   工作树 = facts ∪ notes              ← 只读视图
-git checkout layer/notes     →   工作树 = 只有 notes 自己的文件       ← 只读视图
-git checkout layer/facts     →   工作树 = 只有事实                   ← 只读视图
+git checkout stack           →   工作树 = facts ∪ notes ∪ beliefs   ← 合并视图,日常在这里干活
+git checkout layer/facts     →   工作树 = 只有事实层的文件           ← 权威
+git checkout layer/notes     →   工作树 = 只有 notes 的文件          ← 权威
 ```
 
-日常动作全是 Git 的。`cb` 只有三条命令:`init`、`hook`(git 自己调)、`check`。
+**权威是 `layer/*`,`stack` 是它们 merge 出来的视图。**两边都能提交,hook 负责归位。
+
+日常动作全是 Git 的。`cb` 只有三条命令:`init`、`check`、`rebuild`。
 
 ---
 
@@ -73,41 +74,42 @@ Docker 的类比只到"叠"为止——**overlay 那一整套全不要**。
 
 ---
 
-## 3. 拓扑:一条写入面,两族派生分支
+## 3. 拓扑:权威在 layer/*,stack 是合并视图
 
 ```
-                        写                       派生(只读)
-                        ↓
-stack/beliefs   ●──●──●──●──●         ← 唯一的写入面,也是全局时间线
-                                        工作树 = facts ∪ notes ∪ beliefs
+layer/facts     ●──●──●        权威。只放事实层的文件,线性,必须 fast-forward
+layer/notes     ●──●
+layer/beliefs   ●──●──●
 
-stack/notes     ●──●──●               ← 读视图:facts ∪ notes
-layer/facts     ●──●                  ← 只有事实层自己的文件 + 自己的历史
-layer/notes     ●
-layer/beliefs   ●──●
+stack           ●──●──●──●──●  合并视图。全是 merge,树 = 各层 tip 的并集
+                 ╲  ╲  ╲  ╲ ╲   每个 merge 的信息与那次权威提交逐字相同
 ```
 
-- **写只发生在最长那条 `stack/*` 上。**所有人、所有层,都提交到这一条。
-- **提交信息必须以 `[层名]` 开头**声明属于哪一层(§5)。
-- 接收后由 `cb` **投影**到对应的 `layer/*`,并**重算**所有包含该层的更短 `stack/*`(§6)。
-- 其余分支全是派生的只读视图,没人往上面提交。
-- 最底层不需要单独的 stack 分支:`stack/facts` 与 `layer/facts` 内容和历史都相同,只建后者。
+- **`layer/<name>` 是唯一的权威。** 每条只放自己这一层的文件,历史线性、无 merge、必须 FF。
+- **`stack` 是构建产物。** 一串 merge 节点,树是各层 tip 的不相交并集。**并集由 git 自己算**——路径不相交,merge 天然无冲突,我们不用拼树。
+- **`stack` 名字固定。** 加一层不会让它改名,所以没人需要为此切分支。
 
-**为什么写入面只能有一条。**若允许在较短的 stack 上写,更长那条要跟进就只有两条路:单亲重算(同一事件出现两个 commit 对象,血缘断开),或者 merge 进来(引入 merge 节点)。收敛成一条之后这个二选一消失:**每个事件有且只有一个权威 commit 对象,其余分支上的一切都是它的投影,血缘、顺序、权威三者一致。**`layer/*` 的历史因此是写入面历史的**子序列**——`git log layer/beliefs` 恰好就是"智能体自己干过的事"。
+### 两个入口,hook 负责归位
 
-代价是写入必须串行化,见 §13。
+```
+在 stack 上提交      工作区看得见所有层 → hook 把它拆到权威层,再把 merge 节点顶上去
+在 layer/<L> 上提交   本来就是权威的     → hook 把它 merge 进 stack
+```
 
-### 五条不变量
+**在 stack 上提交是主路径**,因为只有那个工作区同时看得见所有层——智能体要读着事实写结论。它敲的仍然是 `git commit`;归位是 hook 的事。
 
-- **I1 不相交** — 任意两层的路径集无交集。
-- **I2 一致** — `tree(stack/Lk) == union(tree(layer/L1..Lk))`。
-- **I3 线性** — 全仓库无 merge 节点,每条分支的每次前进都是 fast-forward。
-- **I4 对应** — `layer/*` 的每个提交都有 `Cb-Stack` trailer 指回写入面上的源提交。
-- **I5 blob 完整** — 每条 `120000` 软链的目标是相对路径、落在 `blob/` 之内、文件存在,且内容 sha256 与路径中的哈希一致。
+### 一次改动在 stack 上只留一个节点
 
-`cb check` 校验这五条(只看起始点位之后,见 §7)。它们被破坏时,不是警告,是仓库坏了。
+在 stack 上提交后,那个提交**不是**权威的:hook 把属于声明层的子集提交到 `layer/<L>`,把 stack 退回提交前,再造一个 merge 顶上去。所以 `git log --first-parent stack` 读起来就是那条时间线本身,不是"你的提交 + 一个 Merge branch"。
 
-> I1–I4 已在 [`works/exp-single-face.sh`](works/exp-single-face.sh) 里实测通过:五次提交序列后 merge 节点数为 0,所有分支全程 fast-forward,I2 逐字成立。
+### 四条不变量
+
+- **I1 不相交** — 任意两层的路径集无交集(折叠大小写后)。
+- **I2 一致** — `tree(stack) == union(各层 tip 的树)`,且每个层 tip 都是 stack 的祖先。
+- **I3 线性** — 每条 `layer/*` 都没有 merge 节点,每次前进都是 fast-forward。
+- **I4 blob 完整** — 每条 `120000` 软链的目标是相对路径、落在 `blob/` 之内、文件存在,且内容 sha256 与路径中的哈希一致。
+
+`cb check` 校验这四条(只看起始点位之后,见 §7)。I1/I3/I4 被破坏是仓库坏了;**I2 被破坏不致命**——stack 是构建产物,`cb rebuild` 就好,原料是权威分支,不是它自己。
 
 ---
 
@@ -128,99 +130,80 @@ own(Lᵢ) = tree(layer/Lᵢ) 里的全部路径
 ## 5. 拦截:一条规则,两个执行点
 
 ```
-① chmod a-w              写下层文件的那一刻就 EACCES   ← 最快的反馈,可被 chmod 回来
-② commit-msg             提交时拒绝,信息友好           ← 为体验,--no-verify 可跳过
+① chmod a-w              写事实层文件的那一刻就 EACCES   ← 最快的反馈
+② commit-msg             提交时拒绝,信息友好             ← 为体验,--no-verify 可跳过
 ③ reference-transaction  ref 更新时检查落进去的内容      ← 为保证,--no-verify 跳不过
 ④ pre-receive            push 时同一套检查              ← 服务端,暂不做(见 §14)
 ```
 
-②③ 跑的是**同一条规则、同一份实现**,区别只在执行点:② 在提交对象还没建的时候拒绝,能给出好读的、带替代动作的信息;③ 在 ref 更新那一刻拒绝,谁也跳不过(§11)。
+②③ 跑的是**同一条规则、同一份实现**,区别只在执行点。
 
-**本版做 ①②③。**
+### 守卫按分支分两种规则
+
+| 分支 | 规则 |
+|---|---|
+| **`layer/*`**(权威) | FF、无 merge 节点、每个提交的 `[层名]` 必须等于分支名、路径归属、树条目白名单 |
+| **`stack`**(构建产物) | 每个提交都要带**合法的 `[层名]`**(merge 节点也一样),非 merge 的还要过归属与白名单;**不要求 FF**,也不禁止 merge |
+| 其他分支 | 完全放行 |
+
+`stack` 不要求 FF,是因为归位时会改写它(把你的提交换成 merge)。但它**不是不设防**:每个提交的信息都有要求。merge 节点的信息是从权威提交逐字复制来的,所以这条自然满足;**一个不满足它的节点,就说明那不是归位产生的**。
+
+内容检查在 stack 上同样必须做——否则 `--no-verify` 就没人拦了,而 `post-commit` 的退出码 git 根本不理会。
 
 ### 为什么 ② 是 `commit-msg` 而不是 `pre-commit`
 
-钩子顺序是 `pre-commit → prepare-commit-msg → commit-msg`。`pre-commit` 跑的时候**提交信息还不存在**,而这道校验需要同时看到信息(声明的层)和暂存区(实际改动的路径)。只有 `commit-msg` 两样都有(`git diff --cached` 在其中照常可用)。
+钩子顺序是 `pre-commit → prepare-commit-msg → commit-msg`。`pre-commit` 跑的时候**提交信息还不存在**,而这道校验需要同时看到信息(声明的层)和暂存区(实际改动的路径)。只有 `commit-msg` 两样都有。
 
 `pre-commit` 另有职责:blob 转换(§8)。
 
 ### 三条校验
 
 ```
-1. 当前分支不是写入面                  → 拒绝(其余分支都是派生的只读视图)
-2. 无 [层名] 前缀 / 层名不在配置里       → 拒绝
-3. 改动的路径已归属于别的层             → 拒绝,并指出归谁
+1. 在 layer/<L> 上而信息声明了别的层     → 拒绝
+2. 无 [层名] 前缀 / 层名不在 layers 里    → 拒绝(层名按更新前的 layers 判定)
+3. 改动的路径已归属于别的层              → 拒绝,并指出归谁
 ```
 
-实测的拒绝信息:
+**一个提交只能属于一层。**这是特性不是限制——一个跨层的提交,恰好就是把观测和推论搅在一起的那个动作。
 
-```
-拒绝:'project/api.md' 属于层 [facts],本次提交声明的是 [beliefs]
-拒绝:提交信息必须以 [层名] 开头
-```
-
-**一个提交只能属于一层。**想"顺手把事实和笔记一起提交了"是不行的,得拆两次。这是特性不是限制——一个跨层的提交,恰好就是把观测和推论搅在一起的那个动作。
-
-两个比对细节:**路径按折叠大小写比**(大小写不敏感的文件系统上 `Facts/a.md` 与 `facts/a.md` 是两个 git 路径、一个磁盘文件);**软链只允许指向 `blob/` 之内**(否则 blob 机制的"所有 `120000` 都是 blob 指针"这个前提就不成立)。
-
-### `[层名]` 的三个定死的细节
-
-- **用层名,不用序号。**`[facts]` 而不是 `[layer1]`。中途插一层会让序号集体错位,历史里的旧标签全部失真。
-- **放 subject 开头,不放 trailer。** trailer 在 `--oneline` 里看不见,而"一眼看出每个提交属于哪层"是它一半的价值。
-- **字符集受限**(`[a-z][a-z0-9_-]*`),因为它同时是分支名的一部分。
+两个比对细节:**路径按折叠大小写比**;**软链只允许指向 `blob/` 之内**(§8 白名单)。
 
 ### ① post-checkout:锁住事实层
 
-切到写入面之后,把**最底层**的文件 `chmod a-w`。
-
-只锁最底层,不锁全部下层:地板要守的是事实,中间层不是信任边界,而写入面是所有写入者共用的——人提交一条 `[notes]` 不该撞上 EACCES。归属检查在提交时照样执行,所以这一道只是最早的信号,不是保证。
+只锁**最底层**。地板要守的是事实,中间层不是信任边界,而 stack 是所有写入者共用的——人提交一条 `[notes]` 不该撞上 EACCES。站在 `layer/facts` 上时不锁:那就是来写事实的。
 
 `layers`、`.gitignore`、`.collectbase/config.yaml` 例外:它们在最底层里,但那是**机制不是证据**,锁上就没人能加层了。
 
-两件事让这个土办法能用,都已实测:
-
-- **不产生假 diff。** Git 只记录可执行位(100644 / 100755),不记录写位。644→444 在 Git 眼里毫无变化。
-- **不妨碍 Git 自己干活。** 实测 `git checkout HEAD~1 -- <file>` 能成功覆写一个 444 文件——所以**不需要"解锁 → 操作 → 上锁"的包装**。代价是覆写后权限重置为 644,因此每次 checkout / sync 之后必须重打一遍 chmod。
+两件事让这个土办法能用,都已实测:**不产生假 diff**(git 只记可执行位);**不妨碍 git 自己干活**(实测 `git checkout HEAD~1 -- <file>` 能覆写 444 文件)。代价是覆写后权限重置为 644,所以每次 checkout / 归位之后必须重打。
 
 ---
 
-## 6. 传播:投影 + 重算
+## 6. 归位:拆到权威层,再 merge
 
-一次合法提交落在写入面上之后,`cb`(由 `post-commit` 触发)做两件事,都是单亲提交,都不产生 merge 节点:
+`post-commit` 干这件事。
+
+**在 `layer/<L>` 上提交时**,只有一步:
 
 ```
-提交 [notes] 落在 stack/beliefs
-   ↓ 投影   → layer/notes          取子集
-   ↓ 重算   → stack/notes          重算并集树
-   ─ 不动   → layer/facts、layer/beliefs、不含 notes 的更短 stack
+stack = commit-tree <各层 tip 的并集树> -p <stack> -p <layer/L>   信息 = 权威提交的信息
 ```
 
-全部机制归结成两个树运算,都不碰 Git 的合并机制:
+**在 `stack` 上提交时**,先拆再合:
 
-**并集树**(造 `stack/*`)。路径不相交,所以直接拼索引:
-
-```sh
-for L in facts notes; do
-  git ls-tree -r "refs/heads/layer/$L" | GIT_INDEX_FILE=$idx git update-index --index-info
-done
-tree=$(GIT_INDEX_FILE=$idx git write-tree)
+```
+① 取出属于声明层的子集      own = tree(layer/L) 的路径,按本次改动增删
+   layer/L = commit-tree <过滤后的树> -p <layer/L>    信息逐字复制
+② stack 退回到提交前         update-ref stack <你那个提交的父亲>
+③ 把 merge 顶上去            见上
 ```
 
-`git ls-tree -r` 的输出格式正是 `update-index --index-info` 吃的格式,直接管道。重复路径会被**静默覆盖**,所以必须自己查 `uniq -d` 并报错——好处是错误信息由我们写,能说清"这个路径归 facts,换一个"。
+于是那次提交在 stack 上只留一个节点,而权威内容落在 `layer/L` 上。
 
-**过滤树**(造 `layer/*`)。同一套 plumbing,把写入面的 `ls-tree` 输出按本层路径白名单过一遍。
+**并集树由谁算。**merge 是 git 算的,不需要我们拼——路径不相交,三方合并没有同路径分歧。我们只在两处自己拼树:拆子集时(过滤树),和 `cb rebuild` 时(并集树)。后者用 `git ls-tree -r` 直接喂给 `git update-index --index-info`,重复路径要自己查 `uniq -d` 并报错——好处是错误信息由我们写,能说清"这个路径归 facts,换一个"。
 
-两者都用 `git commit-tree $tree -p <上一个 tip>` 单亲成链。投影出来的提交**逐字复制**原提交信息,并追加 `Cb-Stack: <sha>` trailer——两个 commit 对象的 SHA 必然不同(树是子集、父亲不同),所以对应关系必须显式记录。
+### 归位失败时
 
-> 细节与实测见 [`works/branch-topology.md`](works/branch-topology.md) §4–§5。
-
-### 权威:stack,但违规提交不放行
-
-**写入面是权威。**已接收的提交以它为准,不会被重建抹掉,工作不会丢。
-
-但权威不等于投影器无条件服从。`reference-transaction` 挡住了经由 git 命令的一切越界(§11),但直接手写 `.git/refs/…` 仍能把越界提交塞上写入面。这时**投影器停下报错**,把写入面标记为 dirty:既不静默照做(那会把改动写进 `layer/facts`,智能体就真的改到了事实层),也不静默回滚(那会丢工作)。写入面标记 dirty 后,后续提交的投影会继续被拒,`cb check` 报出来,等人处理。
-
-> 这是本设计里**唯一**需要人介入的状态。经由 git 命令走不到这里。
+提交信息没有合法 `[层名]`(只可能是绕过了 `commit-msg`),归位**停下报错**,提交留在原地但没有落到任何权威层上。`git commit --amend` 改完信息再试。这是设计里唯一需要人介入的状态。
 
 ---
 
@@ -235,7 +218,7 @@ tree=$(GIT_INDEX_FILE=$idx git write-tree)
 - beliefs
 ```
 
-**所有东西都从它推出来**,没有第二处真相:有哪些层、层序、分支名(`layer/<名>`、`stack/<名>`)、写入面(`stack/<最后一项>`)、提交信息的合法标签、以及**起始点位**——首次引入这个文件的那个提交。
+**所有东西都从它推出来**,没有第二处真相:有哪些层、层序、权威分支名(`layer/<名>`)、提交信息的合法标签、以及**起始点位**——首次引入这个文件的那个提交。`stack` 的名字是固定的,加一层不会让它改名。
 
 **它归最底层。**改 `layers` 需要一个 `[facts]` 提交,而智能体只能提交 `[beliefs]`。它没法给自己加一层、改层序、把事实层从栈里摘掉。
 
@@ -274,7 +257,7 @@ blob 机制反过来定义了"什么能进 git",这份白名单同时是 `refere
 其余一律拒绝      160000(submodule)、任何别的模式
 ```
 
-`pre-commit` 是转换器,守卫是校验器,**同一条规则的两面**。这一点很要紧:`--no-verify` / `cherry-pick` / `rebase` 都不跑 `pre-commit`,没有守卫这一侧,裸二进制就能直接进写入面(实测确实进去了)。
+`pre-commit` 是转换器,守卫是校验器,**同一条规则的两面**。这一点很要紧:`--no-verify` / `cherry-pick` / `rebase` 都不跑 `pre-commit`,没有守卫这一侧,裸二进制就能直接进来(实测确实进去了)。
 
 两者的二进制判据**必须是同一份实现**,否则转换器说"是文本不转"、校验器说"是二进制拒绝",这个提交就永远进不去。`file` 能读 stdin,所以守卫拿 blob OID 也能用完全相同的判断:`git cat-file blob <oid> | file -b --mime-encoding -`。
 
@@ -288,10 +271,10 @@ blob 机制反过来定义了"什么能进 git",这份白名单同时是 `refere
 
 ```sh
 cb init --layers facts,notes,beliefs
-# 起始点位 = 当前 HEAD;既有 352 个文件全部划归 [facts];建分支、装 hook、切到写入面
+# 起始点位 = 当前 HEAD;既有 352 个文件全部划归 [facts];建分支、装 hook、切到 stack
 # 之前的历史原样保留,不改写;main 留着不动,此后视作普通分支
 
-# 之后一直待在写入面上,不用再切
+# 之后一直待在 stack 上,不用再切
 
 # 事实进来(人 / 采集脚本 / 外部同步)
 cp ~/.claude/projects/…/session.jsonl project/log/2026-08-14.jsonl
@@ -307,12 +290,17 @@ $EDITOR project/log/2026-08-14.jsonl        # → EACCES,当场失败
 git commit -am "[beliefs] 顺手修一下"
 # → 拒绝:'project/log/2026-08-14.jsonl' 属于层 [facts],本次提交声明的是 [beliefs]
 
-# 只看某一层 / 某一层的演化
+# 只看某一层 / 某一层的演化(它们是权威,不是投影)
 git checkout layer/notes
 git log --oneline layer/beliefs              # 只有智能体自己干过的事
 
+# 也可以直接在权威分支上提交,hook 会把它 merge 进 stack
+git checkout layer/facts
+cp …/session.jsonl project/log/2026-08-15.jsonl
+git add -A && git commit -m "[facts] 采集 8-15 会话"
+
 # 全局时间线,自带层标注
-git log --oneline stack/beliefs
+git log --oneline --first-parent stack
 #   * [beliefs] 推翻上一版根因
 #   * [facts]   采集 8-15 日志
 #   * [beliefs] 这次故障的根因判断
@@ -327,11 +315,12 @@ git log --oneline stack/beliefs
 
 ```
 cb init --layers a,b,c      面向已有仓库:定起始点位、既有内容归最底层、建分支、装 hook
-cb check                    校验 I1–I5(尤其 I5 blob 完整性),只看起始点位之后
+cb check                    校验 I1–I4(尤其 I4 blob 完整性),只看起始点位之后
+cb rebuild                  从各层 tip 重建 stack —— 它是构建产物,这么做永远安全
 cb serve                    可选:路径 CRUD + blob 出口(见 works/server.md)
 ```
 
-`cb serve` 是**可选**的:不跑它整套机制照常工作(分层、校验、投影、blob 转换全在 hook 里,零常驻进程)。而且它**没有特权**——往仓库里写东西的方式和人敲 `git commit` 一模一样,被同一套 hook 校验。只要 server 有一条绕过 hook 的路径,那条路径就是地板上的洞,而它恰好是唯一可能被网络访问到的组件。
+`cb serve` 是**可选**的:不跑它整套机制照常工作(分层、校验、归位、blob 转换全在 hook 里,零常驻进程)。而且它**没有特权**——往仓库里写东西的方式和人敲 `git commit` 一模一样,被同一套 hook 校验。只要 server 有一条绕过 hook 的路径,那条路径就是地板上的洞,而它恰好是唯一可能被网络访问到的组件。
 
 **hook 不是 `cb` 的子命令。**collectbase 用 pip 分发,hook 就是直接调 python 的小脚本,打开一眼看懂:
 
@@ -342,7 +331,7 @@ from collectbase.hooks import commit_msg
 raise SystemExit(commit_msg(sys.argv[1:]))
 ```
 
-五个 hook:`pre-commit`(blob 转换)、`commit-msg`(三条校验)、`post-commit`(投影 + 重算)、`post-checkout`(chmod)、`reference-transaction`(否决未经 collectbase 的 ref 更新,见 §11)。
+五个 hook:`pre-commit`(blob 转换)、`commit-msg`(三条校验)、`post-commit`(归位)、`post-checkout`(chmod)、`reference-transaction`(内容守卫,见 §11)。
 
 其余一切用 git:读的 git 已经有了(`git status` / `git log` / `git branch --list 'layer/*'`;甚至"这个路径归哪层"都不用问——下层是 444,`ls -l` 就是答案),写的由 hook 自动发生。
 
@@ -354,16 +343,16 @@ raise SystemExit(commit_msg(sys.argv[1:]))
 
 `git checkout -b scratch` 谁都能敲,也控不住,所以**其他分支是允许的**,hook 在上面直接放行,那是自由的草稿空间。
 
-但草稿分支上的东西**不能绕过 `[层名]` 校验捅进写入面**。实测发现 `commit-msg` 只覆盖"新写一个提交"这一条路,四种操作里三种能绕过:
+但草稿分支上的东西**不能绕过 `[层名]` 校验捅进来**。实测发现 `commit-msg` 只覆盖"新写一个提交"这一条路,四种操作里三种能绕过:
 
 | 操作 | `commit-msg` | 结果 |
 |---|---|---|
 | `git commit` | ✅ | 受控 |
 | `git merge --no-ff` | ✅ | 可拒 |
-| `git merge`(可 FF) | ❌ | 写入面被静默移到未校验的提交 |
-| `git cherry-pick` | ❌ | 无标签的提交直接进了写入面 |
-| `git rebase` | ❌ | 写入面被整个重写 |
-| `git reset --hard` | ❌ 一个 hook 都不跑 | 写入面被移走 |
+| `git merge`(可 FF) | ❌ | 分支被静默移到未校验的提交 |
+| `git cherry-pick` | ❌ | 无标签的提交直接进来了 |
+| `git rebase` | ❌ | 分支被整个重写 |
+| `git reset --hard` | ❌ 一个 hook 都不跑 | 分支被移走 |
 
 **凡是移动 ref 而不新建提交内容的操作,`commit-msg` 全看不见。**
 
@@ -372,23 +361,25 @@ raise SystemExit(commit_msg(sys.argv[1:]))
 关键的转念是**检查内容,不检查来源**——不问"这次更新是谁发起的",只问"落进去的每个提交合不合规":
 
 ```
-对写入面的更新 old → new:
+对 layer/* 的更新 old → new:
   ① new 全零(删除)               放行 —— 否则 git gc 会坏(见下)
   ② old 必须是 new 的祖先          否则拒绝(rebase / reset / force 改写已有历史)
-  ③ old..new 里不能有 merge 节点    否则拒绝
+  ③ old..new 里不能有 merge 节点    权威分支必须线性
   ④ old..new 里的每个提交:
-       信息以合法的 [层名] 开头      层名按 old:layers 判定,不是 new
+       [层名] 必须等于分支名         提交到 layer/notes 就得声明 [notes]
+       层名按 old:layers 判定        不是 new —— 否则提交能给自己发证
        改动路径不属于别的层          折叠大小写后比对
-       改动的每个树条目走白名单      见 §8
+       每个树条目走白名单            见 §8
+
+对 stack 的更新:
+  每个提交(含 merge)都要带合法的 [层名];非 merge 的还要过归属与白名单。
+  不要求 FF,也不禁止 merge —— 归位会改写它,而它本来就全是 merge。
 ```
 
-没有令牌,没有白名单,不关心你用的是哪条 git 命令。实测七种情况全部符合预期,每次拒绝后写入面纹丝不动;而**一个合规的 `[notes]` 提交被 cherry-pick 过来是放行的**——判据是内容,所以不需要为任何操作开特例。
+没有令牌,没有白名单,不关心你用的是哪条 git 命令。实测七种情况全部符合预期,每次拒绝后受管分支纹丝不动;而**一个合规的 `[notes]` 提交被 cherry-pick 过来是放行的**——判据是内容,所以不需要为任何操作开特例。
 
-**四条容易漏的**(都是实测撞出来的):`git pack-refs` 把 loose ref 迁进 `packed-refs` 时呈现为一次删除事务,不放行就 `fatal: failed to run pack-refs`,`git gc` 直接坏掉;`layers` 若从 `new` 读,一个提交就能**同时加层并用这层给自己发证**(实测得逞),必须从 `old` 读,于是加层天然变成两次提交;树条目不走白名单的话,`--no-verify` 跳过 `pre-commit` 就不会 blobify,**一个裸的 2 MB 二进制会直接进写入面**(实测确实进去了),`project/leak.txt -> /etc/hostname` 这样的逃逸软链也照收不误;`cherry-pick` 和 `rebase` 同样不跑 `pre-commit`。
+**四条容易漏的**(都是实测撞出来的):`git pack-refs` 把 loose ref 迁进 `packed-refs` 时呈现为一次删除事务,不放行就 `fatal: failed to run pack-refs`,`git gc` 直接坏掉;`layers` 若从 `new` 读,一个提交就能**同时加层并用这层给自己发证**(实测得逞),必须从 `old` 读,于是加层天然变成两次提交;树条目不走白名单的话,`--no-verify` 跳过 `pre-commit` 就不会 blobify,**一个裸的 2 MB 二进制会直接进来**(实测确实进去了),`project/leak.txt -> /etc/hostname` 这样的逃逸软链也照收不误;`cherry-pick` 和 `rebase` 同样不跑 `pre-commit`。
 
-另外:**写入面领先于投影时拒收新提交**——守卫靠 `layer/*` 的树判归属,投影没跑完时那个判据是失真的。
-
-`layer/*` 与更短的 `stack/*` 同理,规则换成"必须是一次正确的投影 / 重算";直接往它们上面提交一律拒绝(它们是生成物)。
 
 ### 顺带堵上了 `--no-verify`
 
@@ -427,15 +418,15 @@ git commit -m "[beliefs] …"
 
 写在这里是因为它们**不是 bug,是这一版的选择**。
 
-**① 地板不是结构性的,但也不再是纸做的。** 写入面的树里就有事实层的文件,智能体够得着。但要把改动落进去,ref 必须更新,而 `reference-transaction` 会检查落进去的每个提交(§11)——`--no-verify` 跳不过它,`merge` / `reset` / `rebase` / `cherry-pick` 也绕不过。
+**① 地板不是结构性的,但也不再是纸做的。** `stack` 的树里就有事实层的文件,智能体够得着。但要把改动落进去,ref 必须更新,而 `reference-transaction` 会检查落进去的每个提交(§11)——`--no-verify` 跳不过它,`merge` / `reset` / `rebase` / `cherry-pick` 也绕不过。
 
 剩下的绕法只有两条:**直接手写 `.git/refs/…` 或 packed-refs**(不走 git 的 ref 事务),以及**把 `core.hooksPath` 拆掉**。这两条是拆机制,不是绕机制——一个只想省事的智能体不会走到那里,一个铁了心的进程则本来就该用 §13 末尾那两种硬边界来挡。
 
 **② blob 的字节不受分层保护。** 软链是被 git 跟踪的普通路径,受分层规则管;但它指向的字节在 `blob/` 里,是被忽略的,git 全程看不见。一张作为事实的截图可以被悄悄换掉,而 I1–I4 全部照过。
 
-好在内容寻址在这里回本:sha256 就在路径里,**重新哈希一比就知道**。所以 `cb check` 的 I5 不是可选功能,是必需品。
+好在内容寻址在这里回本:sha256 就在路径里,**重新哈希一比就知道**。所以 `cb check` 的 I4 不是可选功能,是必需品。
 
-**③ 写入必须串行化。** 只有一条写入面,而同一个分支不能在两个 worktree 里同时 checkout。采集脚本在后台写事实、智能体同时干活,两者抢同一条分支,需要 `cb` 加一把提交锁。这是单写入面换来一致性的直接代价,没有免费的解。
+**③ 并发写入。** 两个人同时往同一条权威分支写,后一个的 FF 检查会失败(明确报错,不是丢失更新),重试即可。往不同层写互不影响——这是把权威拆成 N 条分支白捡的好处。
 
 **④ 规则散在每个 clone 里。** `core.hooksPath` 缓解了大部分,但 `git config` 那一步仍是每个 clone 一次。
 
@@ -454,11 +445,11 @@ git commit -m "[beliefs] …"
 
 规则同源、一份实现,只换执行点。`pre-receive` 相比本地多三样东西:
 
-1. **ref 级授权。** 直接说"`stack/beliefs` 只有这个身份能推",而不是逐个路径审查内容。**能授权就别去审查**——审查总有你没想到的绕法,授权是结构性的。
+1. **ref 级授权。** 直接说"`layer/facts` 只有这个身份能推",而不是逐个路径审查内容。**能授权就别去审查**——审查总有你没想到的绕法,授权是结构性的。
 2. **看得见整个 push 的每个 commit**,补上"先越界再改回来"那个漏洞(本地 hook 只看得见当次提交)。
 3. **规则只有一份。**
 
-而且**投影和重算可以整个挪到服务端**:`post-receive` 里做 §6 的两个树运算,服务器成为不变量的唯一维护者,客户端彻底不用管,§13 ③ 的提交锁也变成服务端的串行化。
+而且**归位可以整个挪到服务端**:`post-receive` 里做 §6 那两步,服务器成为不变量的唯一维护者,客户端彻底不用管。
 
 成本比想象的低:`pre-receive` 只要接收方是个 bare 仓库就会跑,**本机一个目录就行**,不需要守护进程。要真正的信任边界才需要进程边界——bare 仓库换个 uid + `git-shell`,零长驻进程。
 
@@ -467,9 +458,9 @@ git commit -m "[beliefs] …"
 ## 15. 里程碑
 
 - **M1 骨架** — `cb init` 面向已有仓库的八步(起始点位、既有内容归最底层、建分支、装 hook);`cb check`(I1–I4)。仓库能立起来,不变量能验证。
-- **M2 拦截** — `reference-transaction` 的三条内容检查(真正的闸)+ `commit-msg` 同规则快速反馈 + `post-checkout` 的 chmod。地板生效,别的分支也进不来。
-- **M3 传播** — `post-commit` 做投影 + 重算,加提交锁。写入面和派生分支自动保持一致。
-- **M4 blob** — `pre-commit` 转换 + 孤儿定点清除 + `cb blob gc`;I5 进 `cb check`。
+- **M2 拦截** — `reference-transaction` 的内容检查(真正的闸)+ `commit-msg` 同规则快速反馈 + `post-checkout` 的 chmod。地板生效,别的分支也进不来。
+- **M3 归位** — `post-commit` 拆到权威层 + merge 进 stack,两个入口都覆盖。
+- **M4 blob** — `pre-commit` 转换 + 孤儿定点清除 + `cb blob gc`;I4 进 `cb check`。
 - **M5 手感** — 钩子的拒绝信息说人话:告诉它"这个路径归 facts,你要表达异议就在自己层里另写一份并引用它",带具体命令。见 [`works/cli.md`](works/cli.md) §6。
 - **S1–S4(与 M4 之后并行)** — `cb serve`:blob 传到对象存储 + 网页上传入口。见 [`works/server.md`](works/server.md) §6。
 - **M6(之后)** — 服务端 `pre-receive` + ref 级授权,把 §13 ① 补上。
@@ -480,7 +471,6 @@ git commit -m "[beliefs] …"
 
 - **事实层是否 append-only。** 现在只保证"上层动不了",没保证"事实层自己不能删"。要不要禁止事实层的删除与修改?
 - **层的增删。** 中途在 1 和 2 之间插一层,意味着上面所有 `stack/*` 要重建。支持,还是明确不支持、只能重建仓库?
-- **提交锁的形态。** §13 ③,以及采集脚本被阻塞时的行为。
-- **规模。** `ls-tree` 拼索引在几万文件时的耗时;每次提交都要重算 N-1 条 stack 的并集树,提交频繁时可能需要增量化(只把改动的路径 patch 进上一棵树)。
+- **规模。** 几万文件时,`git merge` 与 `cb rebuild` 的并集拼装各要多久。日常路径靠 git 的 merge,应该没问题;`rebuild` 是全量的。
 - **blob 的日期与"事实发生时间"的关系。** 现在用添加时刻;采集三个月前的会话时,截图会落在今天的日期下。要不要允许声明一个逻辑日期?
 - **软链在 Windows 上**需要开发者模式或管理员权限。当前只面向 Linux harness。

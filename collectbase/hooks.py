@@ -1,13 +1,11 @@
-"""The five git hooks.
+"""五个 git hook。
 
-They are thin: every rule lives in the library, because the server calls the
-same functions without any hook firing (docs/v2/works/server.md §2). Two
-implementations of the same rule would drift, and the failure mode of drift is
-a repository that refuses every commit.
+它们很薄:规则全在库里,因为 server 走 plumbing 时一个 hook 都不触发
+(docs/v2/works/server.md)。两份实现迟早不一致,而不一致的表现是仓库拒绝
+一切提交。
 
-A hook that cannot make sense of the repository stays out of the way — an
-unmanaged repo, a detached HEAD, or a branch collectbase does not own all mean
-"not our business", never "refuse".
+hook 看不懂这个仓库时就让开——没初始化、HEAD 游离、不是受管分支,一律
+"不关我事",绝不是"拒绝"。
 """
 
 from __future__ import annotations
@@ -15,8 +13,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from . import blob, layers as L, project, validate
-from .gitrepo import Git
+from . import blob, layers as L, normalize, validate
+from .gitrepo import Entry, Git
 
 HINT_TAG = """
   提交信息要以 [层名] 开头,声明这次改动属于哪一层:
@@ -25,7 +23,7 @@ HINT_TAG = """
 """
 
 HINT_CROSS = """
-  下层是只读的——这是设计,不是权限配置错误。
+  事实层是只读的——这是设计,不是权限配置错误。
   想表达"这条记录有问题",在自己层里另写一份并引用它:
       git commit -m "[{top}] 对 {path} 的存疑"
 
@@ -37,69 +35,71 @@ def _repo() -> Git:
     return Git(Path.cwd())
 
 
-def _managed(git: Git) -> L.Layers | None:
-    """None means: leave this repository alone."""
-    layers = L.read(git)
-    if layers is None:
+def _here(git: Git, layers: L.Layers) -> str | None:
+    """当前所在的位置:层名、``stack``、或 None(不归我们管)。"""
+    head = git.head_ref()
+    if head is None:
         return None
-    return layers
+    if head == layers.stack_ref:
+        return "stack"
+    if head.startswith("refs/heads/layer/"):
+        name = head.rsplit("/", 1)[1]
+        return name if name in layers else None
+    return None
 
 
 # ------------------------------------------------------------------ 入口
 
 def pre_commit(argv: list[str] | None = None) -> int:
-    """Turn binaries into blob symlinks before the commit is built."""
+    """把二进制转成 blob 软链,趁提交对象还没建起来。"""
     git = _repo()
-    layers = _managed(git)
-    if layers is None:
+    layers = L.read(git)
+    if layers is None or _here(git, layers) is None:
         return 0
 
+    # `--diff-filter` 必须含 T:替换一个媒体文件是把软链换回普通文件,
+    # git 记的是类型变更,不是 M。
     staged = _lines(git.text("diff", "--cached", "--name-only", "--diff-filter=ACMRT", check=False))
-    # `--diff-filter` must include T: replacing a media file swaps a symlink
-    # back to a regular file, which git records as a type change, not M.
+    # `git commit -a` 的暂存发生在本 hook **之后**,所以要改的是工作区,
+    # 只改索引会被随后的暂存覆盖。
     unstaged = _lines(git.text("diff", "--name-only", "--diff-filter=ACMRT", check=False))
-    # `git commit -a` stages *after* this hook, so index-only edits would be
-    # overwritten; the worktree is the thing that must change.
     converted = blob.blobify_worktree(git, sorted(set(staged) | set(unstaged)))
     if converted:
-        state = git.git_dir / "cb-converted"
-        with state.open("a") as fh:
+        with (git.git_dir / "cb-converted").open("a") as fh:
             for c in converted:
                 fh.write(f"{c.path}\t{c.orphan or ''}\n")
         for c in converted:
-            print(f"collectbase: {c.path} → {c.blob_path}", file=sys.stderr)
+            _say(f"collectbase: {c.path} → {c.blob_path}")
     return 0
 
 
 def commit_msg(argv: list[str]) -> int:
-    """Fast, friendly rejection. The guarantee is the ref guard; this exists so
-    the failure arrives before the commit object does, with a readable message."""
+    """快速、好读的拒绝。保证由 ref 守卫给,这一道只是让失败来得更早。"""
     git = _repo()
-    layers = _managed(git)
+    layers = L.read(git)
     if layers is None:
         return 0
+    here = _here(git, layers)
+    if here is None:
+        return 0  # 别人的分支,不关我们的事
 
-    head = git.head_ref()
-    if head is None:
-        return 0
-    if head != layers.write_face:
-        if head in layers.managed_refs():
-            _say(
-                f"✗ 拒绝提交:{head} 是派生分支,由投影生成,不能直接提交。",
-                f"  写入面是 {layers.write_face}:",
-                f"      git checkout stack/{layers.top}",
-            )
-            return 1
-        return 0  # somebody else's branch — not our business
-
-    path = Path(argv[0]) if argv else None
-    subject = (path.read_text().splitlines() or [""])[0] if path else ""
+    subject = ""
+    if argv:
+        text = Path(argv[0]).read_text().splitlines()
+        subject = text[0] if text else ""
     tag = L.tag_of(subject)
 
-    entries = _staged_entries(git)
-    paths = _lines(git.text("diff", "--cached", "--name-only", check=False))
+    if here != "stack" and tag is not None and tag != here:
+        _say(
+            f"✗ 拒绝提交:你在 layer/{here} 上,却声明了 [{tag}]。",
+            f"  要么把信息改成 [{here}],要么切到 layer/{tag},",
+            "  要么在 stack 上提交——那里所有层的文件都看得见,hook 会自动归位。",
+        )
+        return 1
+
     table = validate.owners(git, layers)
-    verdict = validate.check_payload(git, layers, tag, entries, paths, table)
+    paths = _lines(git.text("diff", "--cached", "--name-only", check=False))
+    verdict = validate.check_payload(git, layers, tag, _staged_entries(git), paths, table)
     if verdict.ok:
         return 0
 
@@ -115,62 +115,39 @@ def commit_msg(argv: list[str]) -> int:
 
 
 def post_commit(argv: list[str] | None = None) -> int:
-    """Project, fix the main index after a partial commit, drop orphans."""
+    """归位:把提交放到权威层,再把 merge 节点做出来。"""
     git = _repo()
-    layers = _managed(git)
+    layers = L.read(git)
     if layers is None:
         return 0
 
-    state = git.git_dir / "cb-converted"
-    if state.exists():
-        paths, orphans = [], []
-        for line in state.read_text().splitlines():
-            p, _, o = line.partition("\t")
-            paths.append(p)
-            orphans.append(o)
-        state.unlink()
-        # `git commit -- <path>` hands the hook a temporary index; the main one
-        # still holds the pre-conversion entries for everything else.
-        for p in paths:
-            if (git.root / p).exists():
-                git.run("add", "--", p, check=False)
-        blob.drop_orphans(git, orphans)
+    _finish_blobs(git)
 
-    # The anchor may have changed in this very commit; the branch set has to
-    # catch up before anything can be projected.
-    face_before = layers.write_face
     try:
-        notes = project.reconcile(git, layers)
-    except project.ProjectionError as exc:
+        notes = normalize.reconcile(git, layers)
+    except normalize.NormalizeError as exc:
         _say(f"✗ collectbase:{exc}")
         return 1
     for n in notes:
         _say(f"collectbase: {n}")
 
-    result = project.run(git, layers)
-    if result.stopped:
+    result = normalize.run(git, layers)
+    if not result.ok:
         _say(
-            "✗ collectbase:停止投影。",
+            "✗ collectbase:无法归位。",
             f"  {result.reason}",
-            "  写入面已越过守卫(多半是有人直接写了 .git/refs)。",
-            f"      git revert {result.stopped[:7]}",
+            "  提交还在,但它没有落到任何权威层上。改完提交信息再试:",
+            "      git commit --amend",
         )
         return 1
-    if layers.write_face != face_before or git.head_ref() != layers.write_face:
-        if git.head_ref() != layers.write_face:
-            _say(
-                f"collectbase: 写入面现在是 {layers.write_face[11:]},切过去继续:",
-                f"    git checkout {layers.write_face[11:]}",
-            )
     _relock(git, layers)
     return 0
 
 
 def post_checkout(argv: list[str] | None = None) -> int:
-    """Lower layers read-only. Git resets the mode whenever it rewrites a file,
-    so this has to run again after every checkout."""
+    """事实层只读。git 每次改写文件都会重置权限,所以每次 checkout 都要重打。"""
     git = _repo()
-    layers = _managed(git)
+    layers = L.read(git)
     if layers is None:
         return 0
     _relock(git, layers)
@@ -178,7 +155,7 @@ def post_checkout(argv: list[str] | None = None) -> int:
 
 
 def reference_transaction(argv: list[str]) -> int:
-    """The actual gate. Everything else is ergonomics."""
+    """真正的闸。其余都是体验。"""
     if not argv or argv[0] != "prepared":
         return 0
     git = _repo()
@@ -199,36 +176,50 @@ def reference_transaction(argv: list[str]) -> int:
 
 # ------------------------------------------------------------------ 辅助
 
+def _finish_blobs(git: Git) -> None:
+    """部分提交时 pre-commit 只改得到临时索引,主索引还留着转换前的条目。"""
+    state = git.git_dir / "cb-converted"
+    if not state.exists():
+        return
+    paths, orphans = [], []
+    for line in state.read_text().splitlines():
+        p, _, o = line.partition("\t")
+        paths.append(p)
+        orphans.append(o)
+    state.unlink()
+    for p in paths:
+        if (git.root / p).exists():
+            git.run("add", "--", p, check=False)
+    blob.drop_orphans(git, orphans)
+
+
 def _relock(git: Git, layers: L.Layers) -> None:
-    """Make the fact layer read-only on disk.
+    """把事实层的文件设成只读。
 
-    Only the bottom layer. The floor is the point; the middle layers are not a
-    trust boundary, and the write face is shared by everyone who writes — a
-    human committing ``[notes]`` should not hit EACCES for it. Ownership is
-    still enforced at commit time either way; this is the early signal, not the
-    guarantee.
+    只锁最底层:地板要守的是事实,中间层不是信任边界。归属检查在提交时照样
+    执行,所以这一道只是最早的信号,不是保证。机制文件除外——它们在最底层里,
+    但那是机制不是证据,锁上就没人能加层了。
     """
-    head = git.head_ref()
-    if head != layers.write_face:
+    here = _here(git, layers)
+    if here is None:
         return
-    bottom_ref = layers.layer_ref(layers.bottom)
-    if git.resolve(bottom_ref) is None:
+    head = git.resolve("HEAD")
+    bottom = git.resolve(layers.layer_ref(layers.bottom))
+    if head is None or bottom is None:
         return
-    floor = [e.path for e in git.ls_tree(bottom_ref) if e.path not in L.META_PATHS]
-    face = git.resolve(layers.write_face)
-    if face is None:
+    present = [e.path for e in git.ls_tree(head)]
+    if here == layers.bottom:
+        blob.unlock(git, present)  # 站在事实层上,就是来写事实的
         return
-    above = [e.path for e in git.ls_tree(face) if e.path not in set(floor)]
-    blob.unlock(git, above)
-    blob.relock(git, floor)
+    floor = {e.path for e in git.ls_tree(bottom)} - L.META_PATHS
+    blob.unlock(git, [p for p in present if p not in floor])
+    blob.relock(git, [p for p in present if p in floor])
 
 
-def _staged_entries(git: Git):
-    from .gitrepo import Entry
-
+def _staged_entries(git: Git) -> list[Entry]:
     out = git.run("diff", "--cached", "-z", "--raw", "--no-renames", check=False)
     fields = [f for f in out.split(b"\0") if f]
-    entries = []
+    entries: list[Entry] = []
     i = 0
     while i < len(fields):
         meta = fields[i].decode()

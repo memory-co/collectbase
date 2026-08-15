@@ -1,10 +1,12 @@
-"""The guard: check what lands, not who put it there.
+"""守卫:只保护权威分支,检查落进去的每个提交。
 
-`commit-msg` only sees "someone is writing a new commit". Merge-ff, reset,
-rebase and cherry-pick all move the write face without it firing — measured in
-docs/v2/works/exp-refguard.sh. So the real enforcement point is
-`reference-transaction`, and the rule is stated over the *content* of the
-range being added, which makes it indifferent to the git command used.
+`commit-msg` 只覆盖「新写一个提交」这一条路;merge-ff / reset / rebase /
+cherry-pick 全都绕得过去(docs/v2/works/exp-refguard.sh 实测)。所以真正的闸
+在 `reference-transaction` 上,规则写在**内容**上,因此对用的是哪条 git 命令
+完全无所谓。
+
+守的是 `layer/*`。`stack` 是构建产物,不守——它坏了 `cb check` 会报,重建
+即可,而重建的原料是权威分支,不是它自己。
 """
 
 from __future__ import annotations
@@ -28,10 +30,10 @@ class Verdict:
 
 
 def owners(git: Git, layers: L.Layers) -> dict[str, tuple[str, str]]:
-    """casefold(path) -> (layer, real path).
+    """casefold(path) -> (层, 真实路径)。
 
-    Case-folded because on a case-insensitive filesystem ``Facts/a.md`` and
-    ``facts/a.md`` are two git paths but one file on disk.
+    折叠大小写:在大小写不敏感的文件系统上 ``Facts/a.md`` 和 ``facts/a.md``
+    是两个 git 路径、同一个磁盘文件。
     """
     table: dict[str, tuple[str, str]] = {}
     for name in layers:
@@ -46,17 +48,15 @@ def owners(git: Git, layers: L.Layers) -> dict[str, tuple[str, str]]:
 # ------------------------------------------------------------- 树条目白名单
 
 def check_entries(git: Git, entries: list[Entry], v: Verdict, *, threshold: int) -> None:
-    """Only two shapes may enter git. Everything else is refused.
+    """git 里只允许两种形态,其余一律拒绝。
 
-    This is the blob mechanism read backwards, and it is what stops a raw
-    binary from arriving through a path that skips `pre-commit` — `--no-verify`,
-    `cherry-pick` and `rebase` all do.
+    这是 blob 机制反过来读的结果,也是唯一能拦住"裸二进制从跳过 pre-commit 的
+    路径进来"的东西——`--no-verify`、`cherry-pick`、`rebase` 都不跑 pre-commit。
     """
     for e in entries:
         if e.path == blob.BLOB_DIR or e.path.startswith(blob.BLOB_DIR + "/"):
             v.fail(f"{e.path} 在 blob/ 里 —— 那是存储,不该被跟踪")
-            continue
-        if e.mode in (blob.MODE_FILE, blob.MODE_EXEC):
+        elif e.mode in (blob.MODE_FILE, blob.MODE_EXEC):
             head = git.cat_head(e.oid, blob.SNIFF)
             if blob.is_binary(head, size=git.size(e.oid), threshold=threshold):
                 v.fail(f"{e.path} 是二进制却直接进了 git —— 应该先转成 blob 软链")
@@ -70,16 +70,6 @@ def check_entries(git: Git, entries: list[Entry], v: Verdict, *, threshold: int)
             v.fail(f"{e.path} 的模式 {e.mode} 不在白名单里")
 
 
-def check_ownership(
-    tag: str, paths: list[str], table: dict[str, tuple[str, str]], v: Verdict
-) -> None:
-    for p in paths:
-        hit = table.get(p.casefold())
-        if hit and hit[0] != tag:
-            other, real = hit
-            v.fail(f"{real} 属于层 [{other}],本次提交声明的是 [{tag}]")
-
-
 def check_payload(
     git: Git,
     layers: L.Layers,
@@ -90,16 +80,20 @@ def check_payload(
     *,
     threshold: int = blob.DEFAULT_THRESHOLD,
 ) -> Verdict:
-    """One rule, shared by `commit-msg` (fast feedback) and the ref guard
-    (the actual guarantee). Two copies would drift apart."""
+    """一条规则,`commit-msg`(快速反馈)和 ref 守卫(真正的保证)共用。
+    两份实现迟早会不一致,而不一致的表现是仓库拒绝一切提交。"""
     v = Verdict()
     if tag is None:
-        v.fail("提交信息必须以 [层名] 开头,例如:git commit -m \"[%s] …\"" % layers.top)
+        v.fail('提交信息必须以 [层名] 开头,例如:git commit -m "[%s] …"' % layers.top)
         return v
     if tag not in layers:
         v.fail(f"未知的层 [{tag}];当前 layers = {', '.join(layers.names)}")
         return v
-    check_ownership(tag, paths, table, v)
+    for p in paths:
+        hit = table.get(p.casefold())
+        if hit and hit[0] != tag:
+            other, real = hit
+            v.fail(f"{real} 属于层 [{other}],本次提交声明的是 [{tag}]")
     check_entries(git, entries, v, threshold=threshold)
     return v
 
@@ -108,49 +102,39 @@ def check_payload(
 
 def check_update(git: Git, ref: str, old: str, new: str, *, threshold: int | None = None) -> Verdict:
     v = Verdict()
-    if not (ref.startswith("refs/heads/layer/") or ref.startswith("refs/heads/stack/")):
-        return v
+    if ref == "refs/heads/stack":
+        return _check_stack(git, old, new, threshold)
+    if not ref.startswith("refs/heads/layer/"):
+        return v  # 别人的分支不归守卫管
     if new == ZERO:
-        # Deletion. `git pack-refs` presents the loose->packed migration this
-        # way; refusing it breaks `git gc` outright.
+        # 删除。`git pack-refs` 把 loose ref 迁进 packed-refs 就是这个形状,
+        # 不放行的话 `git gc` 直接坏掉。
         return v
     if old == ZERO:
-        return v  # branch creation (cb init)
+        return v  # 建分支(cb init / 加一层)
 
     layers = L.read_at(git, old) or L.read(git)
     if layers is None:
         return v
+    name = ref.rsplit("/", 1)[1]
+    if name not in layers:
+        return v
     if threshold is None:
         threshold = _threshold(git, new)
 
-    if ref == layers.write_face:
-        _check_write_face(git, layers, old, new, v, threshold=threshold)
-    elif ref in layers.managed_refs():
-        _check_derived(git, layers, ref, old, new, v)
-    return v
-
-
-def _check_write_face(
-    git: Git, layers: L.Layers, old: str, new: str, v: Verdict, *, threshold: int
-) -> None:
     if not git.is_ancestor(old, new):
-        v.fail("不是 fast-forward —— rebase / reset / force 会改写已经落定的历史")
-        return
+        v.fail(f"{ref[11:]} 不是 fast-forward —— rebase / reset / force 会改写已经落定的历史")
+        return v
     if git.rev_list(f"{old}..{new}", "--merges"):
-        v.fail("新增范围里有 merge 节点;这套设计不允许 merge")
-        return
-
-    cursor = git.resolve(L.PROJECTED_REF)
-    if cursor is not None and cursor != old:
-        v.fail(
-            "写入面领先于投影,先把投影补齐再提交"
-            f"(已投影到 {cursor[:7]},写入面在 {old[:7]})"
-        )
-        return
+        v.fail(f"{ref[11:]} 的新增范围里有 merge 节点;权威分支必须是线性的")
+        return v
 
     table = owners(git, layers)
     for commit in git.commits_between(old, new):
         tag = L.tag_of(git.subject(commit))
+        if tag is not None and tag != name:
+            v.fail(f"提交 {commit[:7]} 声明的是 [{tag}],却提交到了 {ref[11:]}")
+            return v
         got = check_payload(
             git, layers, tag,
             git.changed_entries(commit),
@@ -159,30 +143,57 @@ def _check_write_face(
             threshold=threshold,
         )
         if not got.ok:
-            short = commit[:7]
-            v.errors += [f"提交 {short}:{e}" for e in got.errors]
-            return
-        # a commit may claim previously unowned paths for its own layer
+            v.errors += [f"提交 {commit[:7]}:{e}" for e in got.errors]
+            return v
+        for p in git.changed_paths(commit):
+            table.setdefault(p.casefold(), (name, p))
+    return v
+
+
+def _check_stack(git: Git, old: str, new: str, threshold: int | None) -> Verdict:
+    """stack 也设防,只是规则不同:**不要求 fast-forward**(归位时会改写它),
+    也不禁止 merge 节点(它本来就全是 merge)。
+
+    但**每个提交都必须带合法的 [层名]**,merge 节点也一样——它的信息是从权威
+    提交逐字复制过来的,所以这条要求是自然满足的,而一个不满足它的节点就说明
+    那不是归位产生的。内容检查同样要做:否则 `--no-verify` 在 stack 上就没人
+    拦了,而 post-commit 的退出码 git 根本不理会。
+    """
+    v = Verdict()
+    if new == ZERO or old == ZERO:
+        return v
+    layers = L.read_at(git, old) or L.read(git)
+    if layers is None:
+        return v
+    if threshold is None:
+        threshold = _threshold(git, new)
+    table = owners(git, layers)
+    for commit in git.commits_between(old, new):
+        tag = L.tag_of(git.subject(commit))
+        if tag is None:
+            v.fail(f'提交 {commit[:7]} 的信息没有 [层名] 前缀:"{git.subject(commit)}"')
+            return v
+        if tag not in layers:
+            # 层名按 old 判定,不是 new —— 否则一个提交可以同时加层并用这层
+            # 给自己发证。
+            v.fail(f"提交 {commit[:7]}:未知的层 [{tag}];当前 layers = {', '.join(layers.names)}")
+            return v
+        if len(git.parents(commit)) != 1:
+            continue  # merge 节点的内容已在权威分支那一侧验过
+        got = check_payload(
+            git, layers, tag,
+            git.changed_entries(commit),
+            git.changed_paths(commit),
+            table,
+            threshold=threshold,
+        )
+        if not got.ok:
+            v.errors += [f"提交 {commit[:7]}:{e}" for e in got.errors]
+            return v
         if tag:
             for p in git.changed_paths(commit):
                 table.setdefault(p.casefold(), (tag, p))
-
-
-def _check_derived(git: Git, layers: L.Layers, ref: str, old: str, new: str, v: Verdict) -> None:
-    """Derived branches may only ever contain material already on the write
-    face. Exact equality (I2) is `cb check`'s job; the guard's job is to stop
-    anything being smuggled in through a generated branch."""
-    if not git.is_ancestor(old, new):
-        v.fail(f"{ref} 不是 fast-forward")
-        return
-    face = git.resolve(layers.write_face)
-    if face is None:
-        return
-    have = {(e.path, e.mode, e.oid) for e in git.ls_tree(face)}
-    for e in git.ls_tree(new):
-        if (e.path, e.mode, e.oid) not in have:
-            v.fail(f"{ref} 含有写入面上没有的内容:{e.path}(派生分支只能由投影更新)")
-            return
+    return v
 
 
 def _threshold(git: Git, rev: str) -> int:

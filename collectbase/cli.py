@@ -31,7 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     p_init = sub.add_parser("init", help="在已有仓库上建立分层拓扑")
     p_init.add_argument("--layers", required=True, help="自下而上,逗号分隔,例如 facts,notes,beliefs")
 
-    sub.add_parser("check", help="校验 I1–I5")
+    sub.add_parser("check", help="校验 I1–I4")
+    sub.add_parser("rebuild", help="从各层 tip 重建 stack(它是构建产物)")
 
     p_blob = sub.add_parser("blob", help="blob 库维护")
     p_blob_sub = p_blob.add_subparsers(dest="blob_cmd", required=True)
@@ -45,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
         return _init(git, args.layers)
     if args.cmd == "check":
         return _check(git)
+    if args.cmd == "rebuild":
+        return _rebuild(git)
     if args.cmd == "blob":
         return _blob_gc(git, args.dry_run)
     return EXIT_USAGE
@@ -61,7 +64,7 @@ def _init(git: Git, spec: str) -> int:
     layers = L.Layers(tuple(names))
     if not plan.created and not plan.adopted:
         print("已初始化过。补上本地配置(core.hooksPath 不随 clone 传播),并切到写入面。")
-        print(f"  写入面  {layers.write_face.removeprefix('refs/heads/')}")
+        print("  合并视图  stack")
         return EXIT_OK
 
     print(f"起始点位  {plan.start_point[:7]}  [{layers.bottom}] collectbase: init")
@@ -70,12 +73,11 @@ def _init(git: Git, spec: str) -> int:
     print(f"  layer/{layers.bottom:<12} → {plan.start_point[:7]}   复用起始点位,既有历史即事实层历史")
     for name in layers.names[1:]:
         print(f"  layer/{name:<12} → 空树孤儿")
-    for name in layers.stack_names:
-        mark = "  ← 写入面(已切过去)" if name == layers.top else ""
-        print(f"  stack/{name:<12} → {plan.start_point[:7]}{mark}")
+    print(f"  {'stack':<18} → {plan.start_point[:7]}  ← 合并视图(已切过去)")
     print()
     print(f"hook 已装,core.hooksPath = {git.text('config', 'core.hooksPath')}")
     print(f"提交时以 {' / '.join('[%s]' % n for n in layers.names)} 开头声明所属层。")
+    print("在 stack 上提交(看得见所有层)或直接在 layer/<层> 上提交,hook 都会归位。")
     return EXIT_OK
 
 
@@ -95,6 +97,18 @@ def _check(git: Git) -> int:
     if report.findings[0].id == "init":
         return EXIT_UNINITIALISED
     return EXIT_OK if report.ok else EXIT_BROKEN
+
+
+def _rebuild(git: Git) -> int:
+    from . import normalize
+
+    try:
+        new = normalize.rebuild(git)
+    except normalize.NormalizeError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return EXIT_BROKEN
+    print(f"stack → {new[:7]}(各层 tip 的并集)")
+    return EXIT_OK
 
 
 def _blob_gc(git: Git, dry_run: bool) -> int:

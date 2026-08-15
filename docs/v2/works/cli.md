@@ -28,7 +28,7 @@
 | 有哪些层 | 列表的元素 |
 | 层序 | 列表顺序 |
 | 分支名 | `layer/<名>`、`stack/<名>` |
-| 写入面 | `stack/<最后一项>` |
+| 权威分支名 | `layer/<每一项>` |
 | 起始点位 | **首次引入这个文件的那个提交**(`git log --diff-filter=A -- layers`) |
 | 提交信息的合法标签 | `[<任一项>]` |
 
@@ -50,8 +50,7 @@
 
 | 改动 | 行为 |
 |---|---|
-| **顶部追加一层** | 建 `layer/<新>`(空树孤儿提交)+ `stack/<新>`(树 = 当前写入面的树,单亲接在当前写入面上)。**写入面随之上移**,提示用户 `git checkout stack/<新>` |
-| **中间插一层** | 建 `layer/<新>`(空)+ `stack/<新>`。更长的 stack 的树不变(新层是空的),只是多一条读视图,很便宜 |
+| **加一层(任意位置)** | 建 `layer/<新>`(空树孤儿提交),下次归位时它会被 merge 进 `stack`。`stack` 名字固定,**不用切分支** |
 | **删一层** | 该层非空 → 拒绝。空 → 删掉那两条分支 |
 | **改名 / 调序** | **拒绝。**改名会让历史里的 `[旧名]` 全部失真;调序等于重新划分归属 |
 
@@ -104,11 +103,11 @@ git update-ref refs/heads/layer/notes   "$(git commit-tree $empty -m '[cb] init 
 git update-ref refs/heads/layer/beliefs "$(git commit-tree $empty -m '[cb] init layer/beliefs')"
 ```
 
-**⑥ 各条 `stack/*` 也指向起始点位。**
+**⑥ `stack` 是各层 tip 的一次 merge。**
 
-此刻并集树 == 底层树,所以 `stack/notes`、`stack/beliefs`、`layer/facts`、`main` 四条 ref 指向**同一个提交**,不需要任何额外对象。
+`layer/facts` 与 `main` 指向**同一个提交**;`stack` 是各层 tip 的一次 merge(此刻并集树 == 底层树,但这个节点必须建,否则那几条空的层分支不是 stack 的祖先)。
 
-整个 init 只新建了 **N-1 个空孤儿提交**,其余全是 ref。
+整个 init 只新建 **N-1 个空孤儿提交 + 一个 merge 节点**,其余全是 ref。
 
 **⑦ 装 hook —— 必须最后做。**
 
@@ -118,7 +117,7 @@ git config core.hooksPath .collectbase/hooks
 
 顺序不能反:`reference-transaction` 一旦生效,上面第 ④⑤⑥ 步的 `update-ref` 会被它自己拦住(§4)。
 
-**⑧ 切到写入面** `stack/beliefs`,打一遍 chmod(非顶层路径 444)。
+**⑧ 切到 `stack`**,打一遍 chmod(事实层的文件 444)。
 
 `main` 留着不动 —— 它从此是一条"其他分支"(§4),指向起始点位,不再前进。
 
@@ -132,8 +131,7 @@ $ cb init --layers facts,notes,beliefs
   layer/facts     → 4c81be   (复用起始点位,既有历史即事实层历史)
   layer/notes     → 空树孤儿
   layer/beliefs   → 空树孤儿
-  stack/notes     → 4c81be
-  stack/beliefs   → 4c81be   ← 写入面(已切过去)
+  stack           → 各层 tip 的 merge   ← 合并视图(已切过去)
   main            → 4c81be   保留不动,此后视作普通分支
 
   hook 已装,core.hooksPath = .collectbase/hooks
@@ -147,7 +145,7 @@ $ cb init --layers facts,notes,beliefs
 
 ### clone 之后要再跑一次
 
-`core.hooksPath` 是本地配置,不随 clone 走。这时 `cb init` 检测到 `layers` 已存在、分支已齐,**只补 `git config` 并切到写入面**,不重建任何东西。这是 git 的安全设计,绕不过,也不该绕。
+`core.hooksPath` 是本地配置,不随 clone 走。这时 `cb init` 检测到 `layers` 已存在、分支已齐,**只补 `git config` 并切到 `stack`**,不重建任何东西。这是 git 的安全设计,绕不过,也不该绕。
 
 ---
 
@@ -184,8 +182,8 @@ raise SystemExit(commit_msg(sys.argv[1:]))
 
 | 分支 | `commit-msg` / 守卫 |
 |---|---|
-| **写入面** `stack/<最长>` | 全套校验 |
-| **派生分支** `layer/*`、更短的 `stack/*` | **拒绝直接提交**——它们是生成物,只能由投影/重算更新 |
+| **`layer/*`**(权威) | 全套校验;`[层名]` 必须等于分支名;线性、必须 FF |
+| **`stack`**(构建产物) | 每个提交都要带合法 `[层名]`(merge 也一样)+ 内容检查;不要求 FF |
 | **其他分支**(`main`、`scratch`、…) | **完全放行**,collectbase 不管 |
 
 仓库未初始化、HEAD 游离时同样直接放行。不在一个没打算用 collectbase 的场合里挡人。
@@ -208,20 +206,20 @@ hook 文件是被跟踪的,所以**不能把 venv 的绝对路径写死在 sheba
 
 **其他分支是允许的**,也控不住——`git checkout -b scratch` 谁都能敲。hook 在它们上面直接放行,那是自由的草稿空间。
 
-问题是:**草稿分支上的内容,能不能绕过 `[层名]` 校验捅进写入面?**
+问题是:**草稿分支上的内容,能不能绕过 `[层名]` 校验捅进受管分支?**
 
 ### 先看清楚:`commit-msg` 覆盖不了
 
-在写入面上对一条无标签的 `other` 分支执行各种操作,看 `commit-msg` 是否被调用:
+对一条无标签的 `other` 分支执行各种操作,看 `commit-msg` 是否被调用:
 
 | 操作 | 跑了哪些 hook | 结果 |
 |---|---|---|
 | `git commit` | pre-commit, **commit-msg**, post-commit | ✅ 受控 |
 | `git merge --no-ff other` | pre-merge-commit, **commit-msg**, post-merge | ✅ 可拒(还多一个 `pre-merge-commit` 可用) |
-| `git merge other`(可 FF) | 只有 post-merge | ❌ **写入面被静默移到未校验的提交** |
-| `git cherry-pick <c>` | 只有 post-commit | ❌ **无标签的提交直接进了写入面** |
-| `git rebase other` | post-checkout, post-commit, post-rewrite | ❌ **写入面被整个重写** |
-| `git reset --hard other` | **一个都没有** | ❌ **写入面被移走** |
+| `git merge other`(可 FF) | 只有 post-merge | ❌ **分支被静默移到未校验的提交** |
+| `git cherry-pick <c>` | 只有 post-commit | ❌ **无标签的提交直接进来了** |
+| `git rebase other` | post-checkout, post-commit, post-rewrite | ❌ **分支被整个重写** |
+| `git reset --hard other` | **一个都没有** | ❌ **分支被移走** |
 
 `commit-msg` 只覆盖"新写一个提交"这一条路。**凡是移动 ref 而不新建提交内容的操作,它全看不见。**
 
@@ -256,7 +254,7 @@ hook 文件是被跟踪的,所以**不能把 venv 的绝对路径写死在 sheba
 | `git cherry-pick <无标签提交>` | ✗ 拒绝 |
 | **`git cherry-pick <合规的 [notes] 提交>`** | ✅ **放行** |
 
-每一次拒绝之后写入面都纹丝不动。
+每一次拒绝之后受管分支都纹丝不动。
 
 最后两行是这个改法的价值所在:**判据是内容,所以合规的 cherry-pick 自然就该放行**,不需要为它开特例;而不合规的东西,无论走哪条 git 命令都进不来。
 
@@ -277,7 +275,7 @@ fatal: failed to run pack-refs
 
 **② `layers` 必须从 `old` 读,不能从 `new` 读。**
 
-从 `new` 读等于让提交**给自己发证**:一个提交可以同时往 `layers` 里加一行 `evil`、又用 `[evil]` 当自己的标签,守卫查 `new:layers` 时那一行已经在了。实测确认这个洞真实存在,写入面被 `[evil] 我自己给自己发的证` 推进了一格。
+从 `new` 读等于让提交**给自己发证**:一个提交可以同时往 `layers` 里加一行 `evil`、又用 `[evil]` 当自己的标签,守卫查 `new:layers` 时那一行已经在了。实测确认这个洞真实存在,分支被 `[evil] 我自己给自己发的证` 推进了一格。
 
 改成从 `old`(更新前的状态)读之后:
 

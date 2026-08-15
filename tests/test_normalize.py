@@ -1,0 +1,156 @@
+"""归位:权威在 layer/*,stack 是一串 merge。
+
+两个入口都能提交,hook 负责清理干净——在 stack 上提交的会被拆到权威层,
+在 layer 上提交的会被 merge 进 stack。
+"""
+
+from __future__ import annotations
+
+from collectbase import check as check_mod, layers as L, normalize
+
+
+def scenario(repo):
+    """事实层 → notes → beliefs → 事实层继续前进 → beliefs 修正自己。"""
+    repo.write("project/api-notes.md", "约束笔记\n")
+    repo.commit("[notes] api 的调用约束笔记")
+    repo.write("project/why-it-broke.md", "根因判断\n")
+    repo.commit("[beliefs] 这次故障的根因判断")
+    repo.write("project/log/2026-08-15.jsonl", '{"e":2}\n')
+    repo.commit("[facts] 采集 8-15 日志")
+    repo.write("project/why-it-broke.md", "推翻上一版\n")
+    repo.commit("[beliefs] 推翻上一版根因")
+
+
+def layers(repo) -> L.Layers:
+    got = L.read(repo.git)
+    assert got is not None
+    return got
+
+
+# --------------------------------------------------- 在 stack 上提交(主路径)
+
+def test_权威层只含自己的文件(repo):
+    scenario(repo)
+    assert repo.tree("refs/heads/layer/notes") == ["project/api-notes.md"]
+    assert repo.tree("refs/heads/layer/beliefs") == ["project/why-it-broke.md"]
+    facts = repo.tree("refs/heads/layer/facts")
+    assert "project/api.md" in facts and "project/api-notes.md" not in facts
+
+
+def test_布局可以交错(repo):
+    """分层的价值就在于上层能把文件放在下层的文件旁边。"""
+    scenario(repo)
+    assert "project/api.md" in repo.tree("refs/heads/layer/facts")
+    assert "project/api-notes.md" in repo.tree("refs/heads/layer/notes")
+
+
+def test_stack_上每次改动只有一个节点_而且是_merge(repo):
+    before = len(repo.sh("rev-list", "--first-parent", "refs/heads/stack").stdout.splitlines())
+    repo.write("project/n.md", "n\n")
+    repo.commit("[notes] 一条笔记")
+    after = repo.sh("rev-list", "--first-parent", "refs/heads/stack").stdout.splitlines()
+    assert len(after) == before + 1, "在 stack 上提交的那个节点被 merge 顶替,不是两个"
+    tip = after[0]
+    assert len(repo.git.parents(tip)) == 2, "stack 的 tip 应当是 merge"
+
+
+def test_merge_节点的信息与权威提交逐字相同(repo):
+    repo.write("project/n.md", "n\n")
+    repo.commit("[notes] api 的调用约束笔记")
+    assert repo.subject("refs/heads/stack") == "[notes] api 的调用约束笔记"
+    assert repo.subject("refs/heads/layer/notes") == "[notes] api 的调用约束笔记"
+
+
+def test_stack_的树等于各层并集(repo):
+    scenario(repo)
+    tip = repo.sh("rev-parse", "refs/heads/stack^{tree}").stdout.strip()
+    assert tip == normalize.union_tree(repo.git, layers(repo))
+
+
+def test_权威分支线性无_merge(repo):
+    scenario(repo)
+    for name in ("facts", "notes", "beliefs"):
+        assert repo.sh("rev-list", "--merges", f"refs/heads/layer/{name}").stdout.strip() == ""
+
+
+def test_stack_是全局时间线且自带层标注(repo):
+    scenario(repo)
+    subjects = repo.sh("log", "--format=%s", "--first-parent", "refs/heads/stack").stdout.splitlines()
+    assert subjects[:4] == [
+        "[beliefs] 推翻上一版根因",
+        "[facts] 采集 8-15 日志",
+        "[beliefs] 这次故障的根因判断",
+        "[notes] api 的调用约束笔记",
+    ]
+
+
+def test_只看某一层的历史(repo):
+    scenario(repo)
+    beliefs = repo.sh("log", "--format=%s", "refs/heads/layer/beliefs").stdout.splitlines()
+    assert beliefs[:2] == ["[beliefs] 推翻上一版根因", "[beliefs] 这次故障的根因判断"]
+
+
+# ------------------------------------------------- 在 layer 分支上直接提交
+
+def test_在权威分支上提交也会被_merge_进来(repo):
+    repo.sh("checkout", "-q", "layer/notes")
+    repo.write("note.md", "直接写在权威分支上\n")
+    assert repo.commit("[notes] 直接提交").returncode == 0
+
+    assert repo.tree("refs/heads/layer/notes") == ["note.md"]
+    assert repo.subject("refs/heads/stack") == "[notes] 直接提交"
+    assert "note.md" in repo.tree("refs/heads/stack")
+    assert repo.sh(
+        "merge-base", "--is-ancestor", "refs/heads/layer/notes", "refs/heads/stack", check=False
+    ).returncode == 0
+
+
+def test_在权威分支上声明别的层会被拒(repo):
+    repo.sh("checkout", "-q", "layer/notes")
+    repo.write("x.md", "x\n")
+    out = repo.commit("[beliefs] 层名对不上")
+    assert out.returncode != 0
+    assert "却声明了 [beliefs]" in out.stderr
+
+
+def test_事实层可写在自己的分支上(repo):
+    repo.sh("checkout", "-q", "layer/facts")
+    repo.write("project/api.md", "改事实,在事实层上就是合法的\n")
+    assert repo.commit("[facts] 修正记录").returncode == 0
+
+
+# ----------------------------------------------------------------- 其余
+
+def test_删自己层的文件是合法的(repo):
+    scenario(repo)
+    (repo.root / "project/why-it-broke.md").unlink()
+    assert repo.commit("[beliefs] 收回这条结论").returncode == 0
+    assert repo.tree("refs/heads/layer/beliefs") == []
+
+
+def test_删下层的文件被拒(repo):
+    scenario(repo)
+    (repo.root / "project/api.md").chmod(0o644)
+    (repo.root / "project/api.md").unlink()
+    out = repo.commit("[beliefs] 删掉一个事实")
+    assert out.returncode != 0
+    assert "属于层 [facts]" in out.stderr
+
+
+def test_check_全绿(repo):
+    scenario(repo)
+    report = check_mod.run(repo.git)
+    failed = [f.id for f in report.findings if not f.ok]
+    assert failed == [], [f.details for f in report.findings if not f.ok]
+
+
+def test_stack_坏了可以重建(repo):
+    """stack 是构建产物,不是权威。"""
+    scenario(repo)
+    want = repo.sh("rev-parse", "refs/heads/stack^{tree}").stdout.strip()
+    repo.sh("update-ref", "refs/heads/stack", repo.sh("rev-parse", "refs/heads/layer/facts").stdout.strip())
+    assert not check_mod.run(repo.git).ok
+
+    normalize.rebuild(repo.git)
+    assert repo.sh("rev-parse", "refs/heads/stack^{tree}").stdout.strip() == want
+    assert check_mod.run(repo.git).ok

@@ -1,18 +1,16 @@
-"""``cb check`` — the five invariants.
+"""``cb check`` —— 四条不变量。
 
-I5 is the reason this command exists at all: the symlink is protected by the
-layering rules, the bytes it points at are not. Re-hashing is the only way to
-notice a fact's screenshot being swapped. I1–I4 come along for free.
+I4 是这条命令存在的理由:软链受分层规则保护,它指向的字节不受。重新哈希是
+唯一能发现"作为事实的截图被悄悄换掉"的手段。I1–I3 顺手一起验,反正代码都在。
 
-Only the history from the start point onward is checked — collectbase does not
-take over your past.
+只校验起始点位之后的历史——collectbase 不接管你的过去。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import blob, layers as L, project
+from . import blob, layers as L, normalize
 from .gitrepo import Git
 
 
@@ -45,7 +43,6 @@ def run(git: Git) -> Report:
         _disjoint(git, layers),
         _consistent(git, layers),
         _linear(git, layers),
-        _traceable(git, layers),
         _blobs(git),
     ])
 
@@ -70,51 +67,33 @@ def _disjoint(git: Git, layers: L.Layers) -> Finding:
 
 
 def _consistent(git: Git, layers: L.Layers) -> Finding:
+    """stack 是构建产物;它落后或损坏都不致命,重建即可。"""
     bad: list[str] = []
-    for name in layers.stack_names:
-        ref = layers.stack_ref(name)
-        tip = git.resolve(ref)
-        if tip is None:
-            bad.append(f"{ref} 不存在")
-            continue
-        want = project.union_tree(git, layers, name)
-        got = git.text("rev-parse", f"{tip}^{{tree}}")
-        if want != got:
-            bad.append(f"{ref} 的树与 layer/* 的并集不一致")
-    ahead = project.pending(git, layers)
-    if ahead:
-        bad.append(f"写入面领先投影 {len(ahead)} 个提交")
-    return Finding("I2", not bad, "一致:stack/* 的树等于 layer/* 的并集", bad,
-                   remedy="cb check 会在下次提交时自动补齐,或直接再提交一次" if ahead else None)
+    tip = git.resolve(layers.stack_ref)
+    if tip is None:
+        bad.append("stack 不存在")
+    else:
+        if git.text("rev-parse", f"{tip}^{{tree}}") != normalize.union_tree(git, layers):
+            bad.append("stack 的树与各层 tip 的并集不一致")
+        for name in layers:
+            lt = git.resolve(layers.layer_ref(name))
+            if lt and not git.is_ancestor(lt, tip):
+                bad.append(f"stack 还没 merge 进 layer/{name}")
+    return Finding("I2", not bad, "一致:stack 的树等于各层 tip 的并集,且含各层为祖先", bad,
+                   remedy="stack 是构建产物,重建即可:再提交一次,或 cb rebuild")
 
 
 def _linear(git: Git, layers: L.Layers) -> Finding:
+    """权威分支必须线性。stack 全是 merge,那是它的本分。"""
     bad = []
-    for ref in layers.managed_refs():
-        if git.resolve(ref) is None:
-            continue
-        merges = git.rev_list(ref, "--merges")
-        if merges:
-            bad.append(f"{ref} 上有 {len(merges)} 个 merge 节点")
-    return Finding("I3", not bad, "线性:所有受管分支无 merge 节点", bad)
-
-
-def _traceable(git: Git, layers: L.Layers) -> Finding:
-    start = L.start_point(git)
-    missing, total = [], 0
     for name in layers:
         ref = layers.layer_ref(name)
         if git.resolve(ref) is None:
             continue
-        spec = f"{start}..{ref}" if start and git.is_ancestor(start, ref) else ref
-        for commit in git.rev_list(spec):
-            body = git.message(commit)
-            if "collectbase: init" in body:
-                continue
-            total += 1
-            if f"{project.TRAILER}:" not in body:
-                missing.append(f"{ref[16:]} {commit[:7]} 缺 {project.TRAILER} trailer")
-    return Finding("I4", not missing, f"对应:layer/* 的 {total} 个提交都指回写入面", missing[:10])
+        merges = git.rev_list(ref, "--merges")
+        if merges:
+            bad.append(f"layer/{name} 上有 {len(merges)} 个 merge 节点")
+    return Finding("I3", not bad, "线性:每条权威分支都没有 merge 节点", bad)
 
 
 def _blobs(git: Git) -> Finding:
@@ -126,4 +105,4 @@ def _blobs(git: Git) -> Finding:
         remedy = "缺失的从别处拉回来:rsync -a <host>:<path>/blob/ blob/"
     if report.mismatched:
         remedy = (remedy + "\n" if remedy else "") + "哈希不匹配意味着有人绕过机制改了字节,不自动处理"
-    return Finding("I5", report.ok, f"blob 完整:活集 {report.total} 个", details[:10], remedy)
+    return Finding("I4", report.ok, f"blob 完整:活集 {report.total} 个", details[:10], remedy)

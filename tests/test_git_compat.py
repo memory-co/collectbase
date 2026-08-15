@@ -35,8 +35,7 @@ def test_chmod_不产生假_diff(repo):
     assert repo.sh("status", "--porcelain").stdout.strip() == ""
 
 
-def test_删除受管分支不被拦(repo):
-    """删除放行是 pack-refs 能工作的前提;内容都还在 layer/* 里。"""
-    out = repo.sh("branch", "-D", "stack/notes", check=False)
+def test_删除分支不被拦(repo):
+    """删除放行是 pack-refs 能工作的前提。stack 是构建产物,删了重建即可。"""
+    out = repo.sh("branch", "-D", "main", check=False)
     assert out.returncode == 0
-    assert repo.tree("refs/heads/layer/notes") == []

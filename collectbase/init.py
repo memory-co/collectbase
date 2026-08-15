@@ -91,18 +91,20 @@ def run(git: Git, names: list[str]) -> Plan:
         git.update_ref(layers.layer_ref(name), oid, reason="collectbase: init")
         created.append(layers.layer_ref(name))
 
-    # ⑥ 各条 stack 此刻的并集树 == 底层树,所以直接共享起始点位这一个提交
-    for name in layers.stack_names:
-        git.update_ref(layers.stack_ref(name), start, reason="collectbase: init")
-        reused.append(layers.stack_ref(name))
-
-    git.update_ref(L.PROJECTED_REF, start, reason="collectbase: init")
+    # ⑥ stack 是各层 tip 的 merge。此刻并集树 == 底层树,但仍要建这个节点,
+    #    否则那几条空的层分支不是 stack 的祖先,下一次归位会把它们当成"待
+    #    merge",拿 init 的消息盖掉真正的提交。
+    tips = [git.resolve(layers.layer_ref(n)) for n in layers]
+    stack = git.commit_tree(start + "^{tree}" and git.text("rev-parse", f"{start}^{{tree}}"),
+                            [t for t in tips if t], f"[{layers.bottom}] collectbase: init stack")
+    git.update_ref(layers.stack_ref, stack, reason="collectbase: init")
+    created.append(layers.stack_ref)
 
     # ⑦ 装 hook —— 必须最后做,否则 reference-transaction 会拦住上面的 update-ref
     _write_hooks(git)
 
-    # ⑧ 切到写入面并上锁
-    git.run("checkout", "-q", layers.write_face.removeprefix("refs/heads/"))
+    # ⑧ 切到 stack 并上锁
+    git.run("checkout", "-q", "stack")
 
     return Plan(start, created, reused, adopted)
 
@@ -114,9 +116,8 @@ def _reinit(git: Git, layers: L.Layers) -> Plan:
     it is not something to route around.
     """
     _write_hooks(git)
-    face = layers.write_face.removeprefix("refs/heads/")
-    if git.resolve(layers.write_face) is not None:
-        git.run("checkout", "-q", face)
+    if git.resolve(layers.stack_ref) is not None:
+        git.run("checkout", "-q", "stack")
     start = L.start_point(git) or git.resolve("HEAD") or ""
     return Plan(start, [], list(layers.managed_refs()), 0)
 
