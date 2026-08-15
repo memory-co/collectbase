@@ -118,23 +118,23 @@ collectbase(库)
 
 不进仓库(机器级,含凭证):
 
-```toml
-# ~/.config/collectbase/server.toml
-repo  = "/home/me/notes"
-bind  = "127.0.0.1:8787"
-token = ""                    # 绑定非回环地址时必填
+```yaml
+# ~/.config/collectbase/server.yaml
+repo:  /home/me/notes
+bind:  127.0.0.1:8787
+token: ""                     # 绑定非回环地址时必填
 
-[blob_store]
-kind     = "s3"               # s3 | file
-endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
-bucket   = "my-collectbase"
-prefix   = "blob/"
-access_key_id     = "…"
-access_key_secret = "…"
-scan_interval = "5m"
+blob_store:
+  kind:     s3                # s3 | file
+  endpoint: https://oss-cn-hangzhou.aliyuncs.com
+  bucket:   my-collectbase
+  prefix:   blob/
+  access_key_id:     "…"
+  access_key_secret: "…"
+  scan_interval: 5m
 ```
 
-仓库里的 `.collectbase/config.toml` 只放与仓库有关的可调项(blob 阈值、`force_in` / `force_out`)。两者不混。
+仓库里的 `.collectbase/config.yaml` 只放与仓库有关的可调项(blob 阈值、`force_in` / `force_out`)。两者不混。
 
 ---
 

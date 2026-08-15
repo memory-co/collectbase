@@ -220,22 +220,22 @@ tree=$(GIT_INDEX_FILE=$idx git write-tree)
 
 ## 7. `layers`:唯一锚定
 
-仓库根目录一个纯文本文件,**一行一层,自下而上**:
+仓库根目录一个 YAML 文件 `layers`,**一个列表,自下而上**:
 
-```
-# collectbase layers — 顺序即层序,第一行是事实层
-facts
-notes
-beliefs
+```yaml
+# 顺序即层序,第一项是事实层
+- facts
+- notes
+- beliefs
 ```
 
-**所有东西都从它推出来**,没有第二处真相:有哪些层、层序、分支名(`layer/<名>`、`stack/<名>`)、写入面(`stack/<最后一行>`)、提交信息的合法标签、以及**起始点位**——首次引入这个文件的那个提交。
+**所有东西都从它推出来**,没有第二处真相:有哪些层、层序、分支名(`layer/<名>`、`stack/<名>`)、写入面(`stack/<最后一项>`)、提交信息的合法标签、以及**起始点位**——首次引入这个文件的那个提交。
 
 **它归最底层。**改 `layers` 需要一个 `[facts]` 提交,而智能体只能提交 `[beliefs]`。它没法给自己加一层、改层序、把事实层从栈里摘掉。
 
 **起始点位之前的历史不受任何约束。**已有仓库里那些没有层标签的旧提交、混在一起的二进制、任意的分支结构,全部原样保留、不改写;`cb check` 只校验起始点位之后的部分。collectbase 不接管你的过去,它从某个提交开始接管未来——这是"面向已有仓库"的关键。
 
-blob 的可调项另放 `.collectbase/config.toml`(阈值、`force_in` / `force_out`),锚定文件保持最小。
+blob 的可调项另放 `.collectbase/config.yaml`(阈值、`force_in` / `force_out`),锚定文件保持最小。
 
 > `cb init` 在已有仓库上的完整八步、`layers` 变更时分支集合怎么调整,见 [`works/cli.md`](works/cli.md) §1–§2。
 
