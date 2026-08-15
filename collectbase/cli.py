@@ -34,6 +34,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check", help="校验 I1–I4")
     sub.add_parser("rebuild", help="从各层 tip 重建 stack(它是构建产物)")
 
+    p_serve = sub.add_parser("serve", help="路径 CRUD + 分层文件管理器")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8787)
+    p_serve.add_argument("--token", default=None, help="绑定非回环地址时必填")
+
     p_blob = sub.add_parser("blob", help="blob 库维护")
     p_blob_sub = p_blob.add_subparsers(dest="blob_cmd", required=True)
     p_gc = p_blob_sub.add_parser("gc", help="删掉没有任何提交引用的 blob")
@@ -54,6 +59,15 @@ def main(argv: list[str] | None = None) -> int:
         return _check(git)
     if args.cmd == "rebuild":
         return _rebuild(git)
+    if args.cmd == "serve":
+        from . import serve as serve_mod
+
+        try:
+            serve_mod.serve(git.root, args.host, args.port, args.token)
+        except serve_mod.ServeError as exc:
+            print(f"✗ {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        return EXIT_OK
     if args.cmd == "blob":
         if args.blob_cmd == "gc":
             return _blob_gc(git, args.dry_run)

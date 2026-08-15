@@ -311,7 +311,7 @@ cb init --layers a,b,c      面向已有仓库:定起始点位、既有内容归
 cb check                    校验 I1–I4(尤其 I4 blob 完整性),只看起始点位之后
 cb rebuild                  从各层 tip 重建 stack —— 它是构建产物,这么做永远安全
 cb blob push/pull <url>     blob 的异地副本(file:/// 或 s3://)
-cb serve                    可选:路径 CRUD + blob 出口(见 works/server.md)
+cb serve                    可选:路径 CRUD + 分层文件管理器(见 works/server.md)
 ```
 
 `cb serve` 是**可选**的:不跑它整套机制照常工作(分层、校验、归位、blob 转换全在 hook 里,零常驻进程)。而且它**没有特权**——往仓库里写东西的方式和人敲 `git commit` 一模一样,被同一套 hook 校验。只要 server 有一条绕过 hook 的路径,那条路径就是地板上的洞,而它恰好是唯一可能被网络访问到的组件。

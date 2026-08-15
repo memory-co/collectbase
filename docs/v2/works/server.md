@@ -19,10 +19,12 @@
 ## 1. CRUD
 
 ```
-读   GET  /files/<path>?view=<层|all>     文件内容
-     GET  /files/<dir>/?view=<层|all>     列目录:名字、大小、归属层、最后修改
-写   POST /commit    {layer, message, ops: [put(path, bytes) | delete(path)]}
-                     → 落在 layer/<layer> 上,再 merge 进 stack。和敲 git commit 同一条路。
+读   GET  /api/file?path=…&view=<层|all>     文件内容(blob 透明:拿到的是字节)
+     GET  /api/list?path=…&view=<层|all>     列目录:名字、大小、归属层、最后修改
+写   POST /api/commit  {layer, message, ops:[{op:"put",path,content(base64)}|{op:"delete",path}]}
+                       → 落在 layer/<layer> 上,再 merge 进 stack。和敲 git commit 同一条路。
+其余 GET  /api/info                          层、起始点位、blob 活集
+     GET  /                                  分层文件管理器(这套 API 的一个客户端)
 ```
 
 **写是一个批量端点,不是逐路径 PUT。**提交是变更的单位:拖进 5 个文件是一次动作,改名是"新增 + 删除"同时发生,都该是一个提交。一批 ops → 一个提交,顺带把多文件上传、批量删除、改名全覆盖了。
@@ -143,10 +145,10 @@ blob_store:
 
 排在主设计 M4 之后。**前提**:M1–M4 得先把 `blobify` / `validate` / `project` / `commit` 抽成库函数(§2 ①),否则 server 只能复制一份逻辑。
 
-- **S1** — blob 出口:四方法 + `file://` 与 S3 实现。**命令行部分已完成**(`cb blob push/pull`);周期扫描与启动时自动补齐留给常驻进程。
-- **S2** — 读:`GET /files/…`,视图切换、按层标注、预览、下载。
-- **S3** — 写:`POST /commit`,批量 ops、乐观重试、工作区路径同步、拒绝信息透传。
-- **S4** — poke;`file://` 后端。
+- **S1 ✅** — blob 出口:四方法 + `file://` 与 S3 实现,`cb blob push/pull`。周期扫描与启动时自动补齐留给常驻进程。
+- **S2 ✅** — 读:`GET /api/list`、`GET /api/file`,视图切换、按层标注、blob 透明。
+- **S3 ✅** — 写:`POST /api/commit`,批量 ops → 一个提交,工作区路径同步,拒绝信息透传。
+- **S4** — 周期扫描与 `post-commit` 的 poke;预签名直传。
 
 ---
 
