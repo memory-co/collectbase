@@ -171,7 +171,7 @@ raise SystemExit(commit_msg(sys.argv[1:]))
 |---|---|---|
 | `pre-commit` | 二进制转 blob + 软链;记下将被孤立的 OID | [blob-store §2](blob-store.md) |
 | `commit-msg` | 三条校验,快速反馈(§4);可被 `--no-verify` 跳过,不是最终防线 | [branch-topology §3](branch-topology.md) |
-| `post-commit` | 投影 + 重算;补主索引;定点清孤儿;`layers` 变更时调整分支集合 | [branch-topology §4](branch-topology.md) |
+| `post-commit` | 落到权威层 + merge 进 stack;补主索引;定点清孤儿;`layers` 变更时调整分支集合 | [branch-topology §4](branch-topology.md) |
 | `post-checkout` | 重打 chmod:非顶层 444,顶层可写 | [DESIGN §5](../DESIGN.md) |
 | `reference-transaction` | **真正的闸**:检查 `old..new` 里每个提交是否合规,不合规就否决整个 ref 事务(§4) | 本篇 |
 
@@ -285,12 +285,6 @@ fatal: ref updates aborted by hook
 
 顺带两条:改 `layers` 的提交**只应改 `layers`**(别和内容混在一起),**删除 `layers` 文件要拒绝**。
 
-**③ 写入面有未投影的提交时,拒收新提交。**
-
-守卫靠 `layer/*` 的树判断路径归属,而 `layer/*` 是 `post-commit` 更新的。如果投影没跑完,一个刚进事实层的新路径还不在 `layer/facts` 里,下一个 `[beliefs]` 提交就能把它据为己有——归属判据在那一瞬间是失真的。
-
-规则:**写入面领先于投影时,拒绝接受新提交**,先把投影补齐(下次 `post-commit` 会按 `Cb-Stack` trailer 为界自动补)。
-
 **④ 树条目走白名单,不是逐条打补丁。**
 
 blob 机制其实已经定义了"什么能进 git",守卫照着验就行,不必为软链、submodule 各写一条规则:
@@ -304,7 +298,7 @@ git 里只允许两种形态:
 
 `pre-commit` 是**转换器**,守卫是**校验器**,两者是同一条规则的两面。
 
-这个白名单堵的洞比看起来大。`--no-verify` 跳过 `pre-commit`,blobify 就不发生;`cherry-pick` 和 `rebase` 也不跑 `pre-commit`。在只查标签和路径归属的旧版守卫下,**一个裸的 2 MB 二进制会直接进写入面**——实测确实进去了。加上白名单之后:
+这个白名单堵的洞比看起来大。`--no-verify` 跳过 `pre-commit`,blobify 就不发生;`cherry-pick` 和 `rebase` 也不跑 `pre-commit`。在只查标签和路径归属的旧版守卫下,**一个裸的 2 MB 二进制会直接进来**——实测确实进去了。加上白名单之后:
 
 ```
 ✗ project/raw.png 是二进制却直接进了 git —— 应该先转成 blob 软链
@@ -344,7 +338,7 @@ git 里只允许两种形态:
 
 ### 派生分支同理
 
-`layer/*` 和更短的 `stack/*` 也归 `reference-transaction` 管,规则换成"必须是一次正确的投影 / 重算":新提交的树要等于按当前 `layer/*` 算出的过滤树 / 并集树,且 `layer/*` 的提交要带 `Cb-Stack` trailer 指回写入面。同样是内容检查,同样不需要令牌。
+`layer/*` 是权威,规则更严:FF、无 merge 节点、`[层名]` 等于分支名、路径归属、白名单。`stack` 只要求每个新增提交带合法 `[层名]`(见 [branch-topology §6](branch-topology.md))。
 
 ### 于是"其他分支"的规矩
 
@@ -372,7 +366,7 @@ git 里只允许两种形态:
 
 ## 5. `cb check`
 
-唯一 git 做不到的检查是 **I5:blob 完整性**——软链受分层保护,但它指向的字节在 `blob/` 里,git 全程看不见,一张作为事实的截图可以被悄悄换掉而 I1–I4 全部照过。sha256 就在路径里,重新哈希一比就知道。**这是必需项,不是诊断工具。**顺手把 I1–I4 也验了,反正代码都在。
+唯一 git 做不到的检查是 **I4:blob 完整性**——软链受分层保护,但它指向的字节在 `blob/` 里,git 全程看不见,一张作为事实的截图可以被悄悄换掉而 I1–I4 全部照过。sha256 就在路径里,重新哈希一比就知道。**这是必需项,不是诊断工具。**顺手把 I1–I3 也验了,反正代码都在。
 
 **只校验起始点位之后的部分**(§1)。之前的历史不受约束。
 
@@ -380,10 +374,9 @@ git 里只允许两种形态:
 $ cb check
   起始点位  4c81be  [facts] collectbase: init   (2026-08-14)
   I1 不相交     ✓  三层共 412 个路径,无重叠
-  I2 一致       ✓  stack/* 的树与并集逐字相同
-  I3 线性       ✓  无 merge 节点;全部分支 fast-forward
-  I4 对应       ✓  layer/* 的 87 个提交都有 Cb-Stack trailer
-  I5 blob       ✗  2 个缺失、1 个哈希不匹配、1 条逃逸软链
+  I2 一致       ✓  stack 的树等于各层 tip 的并集,且含各层为祖先
+  I3 线性       ✓  每条权威分支都没有 merge 节点
+  I4 blob       ✗  2 个缺失、1 个哈希不匹配、1 条逃逸软链
                    缺失  blob/2026/07/23/f1a4f2…ac.png  ← layer/facts
                    篡改  blob/2026/07/19/6dd875…9d.png  ← layer/facts
                    逃逸  project/leak.txt -> /etc/hostname  ← layer/notes
@@ -431,7 +424,5 @@ $ cb check
 ## 7. 待定
 
 - **多 clone 协作。** `fetch`/`pull` 对 `stack/*` 的更新走同一套检查,单机下正确;多 clone 时派生分支的检查要重新设计(远端的 `layer/*` 未必和本地一致),多半要和服务端 `pre-receive`(主设计 §14)一起考虑。
-- **投影的并发锁。** `post-commit` 里的投影 + 重算要串行,锁放哪、等多久、超时怎么办。
-- **`layers` 顶部追加一层时写入面上移**,用户/智能体正停在旧写入面上。怎么提示、要不要自动 checkout。
 - **多仓库共享 blob 库。**
 - **`cb blob gc` 的时机。** 手动,还是 `post-commit` 按阈值触发?活集要遍历 `git rev-list --all` 的全部树,不便宜。

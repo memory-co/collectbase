@@ -283,7 +283,7 @@ $EDITOR project/log/2026-08-14.jsonl        # → EACCES,当场失败
 git commit -am "[beliefs] 顺手修一下"
 # → 拒绝:'project/log/2026-08-14.jsonl' 属于层 [facts],本次提交声明的是 [beliefs]
 
-# 只看某一层 / 某一层的演化(它们是权威,不是投影)
+# 只看某一层 / 某一层的演化(它们就是权威分支)
 git checkout layer/notes
 git log --oneline layer/beliefs              # 只有智能体自己干过的事
 
