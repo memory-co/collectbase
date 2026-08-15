@@ -38,6 +38,12 @@ def main(argv: list[str] | None = None) -> int:
     p_blob_sub = p_blob.add_subparsers(dest="blob_cmd", required=True)
     p_gc = p_blob_sub.add_parser("gc", help="删掉没有任何提交引用的 blob")
     p_gc.add_argument("-n", "--dry-run", action="store_true")
+    for name, helptext in (("push", "把 blob 传到异地"), ("pull", "把缺的 blob 拉回来")):
+        sp = p_blob_sub.add_parser(name, help=helptext)
+        sp.add_argument("url", help="file:///path 或 s3://bucket/prefix")
+        sp.add_argument("--endpoint")
+        sp.add_argument("--access-key-id")
+        sp.add_argument("--access-key-secret")
 
     args = parser.parse_args(argv)
     git = Git(Path(args.repo))
@@ -49,7 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "rebuild":
         return _rebuild(git)
     if args.cmd == "blob":
-        return _blob_gc(git, args.dry_run)
+        if args.blob_cmd == "gc":
+            return _blob_gc(git, args.dry_run)
+        return _blob_sync(git, args)
     return EXIT_USAGE
 
 
@@ -111,6 +119,29 @@ def _rebuild(git: Git) -> int:
         return EXIT_BROKEN
     print(f"stack → {new[:7]}(各层 tip 的并集)")
     return EXIT_OK
+
+
+def _blob_sync(git: Git, args) -> int:
+    from . import store as store_mod
+
+    try:
+        store = store_mod.open_store(
+            args.url,
+            endpoint=args.endpoint,
+            access_key_id=args.access_key_id,
+            access_key_secret=args.access_key_secret,
+        )
+        fn = store_mod.push if args.blob_cmd == "push" else store_mod.pull
+        report = fn(git, store)
+    except store_mod.StoreError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    verb = "上传" if args.blob_cmd == "push" else "拉回"
+    print(f"{verb} {len(report.moved)} 个,跳过 {report.skipped} 个(已存在且哈希正确)")
+    for path, why in sorted(report.failed.items()):
+        print(f"  ✗ {path}:{why}", file=sys.stderr)
+    return EXIT_OK if report.ok else EXIT_BROKEN
 
 
 def _blob_gc(git: Git, dry_run: bool) -> int:

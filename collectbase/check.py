@@ -107,7 +107,7 @@ def _blobs(git: Git) -> Finding:
     details += [f"篡改  {p}  ← {', '.join(sorted(r))}" for p, r in sorted(report.mismatched.items())]
     remedy = None
     if report.missing:
-        remedy = "缺失的从别处拉回来:rsync -a <host>:<path>/blob/ blob/"
+        remedy = "缺失的拉回来:cb blob pull <file:///path | s3://bucket/prefix>"
     if report.mismatched:
         remedy = (remedy + "\n" if remedy else "") + "哈希不匹配意味着有人绕过机制改了字节,不自动处理"
     return Finding("I4", report.ok, f"blob 完整:活集 {report.total} 个", details[:10], remedy)

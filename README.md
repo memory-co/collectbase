@@ -83,6 +83,8 @@ cb init --layers a,b,c      在已有仓库上建立拓扑:定起始点位、既
 cb check                    校验 I1–I4
 cb rebuild                  从各层 tip 重建 stack(它是构建产物)
 cb blob gc [-n]             删掉没有任何提交引用的 blob
+cb blob push <url>          把 blob 传到异地(file:/// 或 s3://)
+cb blob pull <url>          把缺的 blob 拉回来,写盘前验 sha256
 ```
 
 **其余一切用 git。** 读的 git 已经有了(`git status` / `git log` / `git branch --list 'layer/*'`;甚至"这个路径归哪层"都不用问——事实层是 444,`ls -l` 就是答案),写的由 hook 自动发生。
