@@ -20,7 +20,6 @@ from dataclasses import dataclass
 
 from . import layers as L
 from .gitrepo import Entry, Git
-from .validate import owners
 
 
 class NormalizeError(RuntimeError):
@@ -87,11 +86,12 @@ def run(git: Git, layers: L.Layers | None = None) -> Result:
 
 
 def _extract(git: Git, layers: L.Layers) -> str | None:
-    """把落在 stack 上的那个提交搬到权威层分支上。
+    """把落在 stack 上的那次改动搬到它的权威层分支上。
 
-    人会在 stack 上提交,因为**只有这个工作区同时看得见所有层**。但那个提交
-    不是权威的,所以要拆开:属于声明层的子集变成 ``layer/<L>`` 上的一个提交,
-    stack 退回到提交前,好让 merge 节点顶上去。
+    人会在 stack 上提交,因为**只有那个工作区同时看得见所有层**。但那个提交
+    不是权威的,所以要把**这一次改动**应用到 ``layer/<L>`` 上——一个提交只能
+    属于一层(守卫保证),所以它的 diff 本来就只碰那一层的路径,搬过去就是
+    一次 cherry-pick,由 git 算。然后 stack 退回提交前,让 merge 节点顶上去。
     """
     tip = git.resolve("HEAD")
     if tip is None or len(git.parents(tip)) != 1:
@@ -104,24 +104,7 @@ def _extract(git: Git, layers: L.Layers) -> str | None:
     layer_ref = layers.layer_ref(tag)
     layer_tip = git.resolve(layer_ref)
 
-    # 在层分支**现有的树**上,只应用属于本层的那几处改动。不能拿 stack 的树
-    # 过滤一遍就完事——各层都从始祖出发,那份共同的基还在每条层分支上,过滤
-    # 会把它整个删掉;而从 stack 里连基一起取,又会把别层刚改过的版本带进来,
-    # 下次 merge 时两侧就都"动过"了。
-    entries = {e.path: e for e in git.ls_tree(layer_ref)} if layer_tip else {}
-    incoming = {e.path: e for e in git.ls_tree(tip)}
-    # 归属按**改动之前**的状态判断:被删掉的路径改动之后已经不属于任何层了,
-    # 用改动之后的集合去筛,删除动作就永远落不下去。
-    table = owners(git, layers)
-    for path in git.changed_paths(tip):
-        hit = table.get(path.casefold())
-        if hit and hit[0] != tag:
-            continue  # 别层的,守卫已经拦过;这里是防御
-        if path in incoming:
-            entries[path] = incoming[path]
-        else:
-            entries.pop(path, None)
-    tree = git.write_tree(list(entries.values()))
+    tree = git.apply_onto(tip, layer_ref) if layer_tip else git.text("rev-parse", f"{tip}^{{tree}}")
 
     if layer_tip is not None and git.text("rev-parse", f"{layer_tip}^{{tree}}") == tree:
         new_layer = layer_tip  # 内容没变(比如只改了别层的东西)

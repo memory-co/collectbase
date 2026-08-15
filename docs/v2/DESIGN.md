@@ -193,18 +193,18 @@ own(Lᵢ) = tree(layer/Lᵢ) 里的全部路径
 stack = commit-tree <各层 tip 的并集树> -p <stack> -p <layer/L>   信息 = 权威提交的信息
 ```
 
-**在 `stack` 上提交时**,先拆再合:
+**在 `stack` 上提交时**,先把这次改动搬过去,再合:
 
 ```
-① 取出属于声明层的子集      own = tree(layer/L) 的路径,按本次改动增删
-   layer/L = commit-tree <过滤后的树> -p <layer/L>    信息逐字复制
-② stack 退回到提交前         update-ref stack <你那个提交的父亲>
-③ 把 merge 顶上去            见上
+① 把这一次改动应用到 layer/L 上   一次 cherry-pick,由 git 三方合并算出来
+   layer/L = commit-tree <结果树> -p <layer/L>       信息逐字复制
+② stack 退回到提交前              update-ref stack <你那个提交的父亲>
+③ 把 merge 顶上去                 见上
 ```
 
-于是那次提交在 stack 上只留一个节点,而权威内容落在 `layer/L` 上。
+**这里没有"从全量树里过滤出子集"这回事。**一个提交只能属于一层(§5 保证),所以它的 diff 本来就只碰那一层的路径;搬过去就是把这次改动**应用**上去,和 `git cherry-pick` 是同一件事,只是不碰工作区(临时索引里 `read-tree -i -m --aggressive` 再 `write-tree`)。
 
-**并集树由谁算。**merge 是 git 算的,不需要我们拼——路径不相交,三方合并没有同路径分歧。我们只在两处自己拼树:拆子集时(过滤树),和 `cb rebuild` 时(并集树)。后者用 `git ls-tree -r` 直接喂给 `git update-index --index-info`,重复路径要自己查 `uniq -d` 并报错——好处是错误信息由我们写,能说清"这个路径归 facts,换一个"。
+**树全由 git 算。**合并是 `git merge-tree`,搬运是三方合并,两处都不需要我们自己拼路径。唯一自己拼的地方是 `cb rebuild`,而那是全量重建,本来就该显式。
 
 ### 归位失败时
 

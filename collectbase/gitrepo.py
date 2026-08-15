@@ -139,6 +139,32 @@ class Git:
         finally:
             idx.unlink(missing_ok=True)
 
+    def apply_onto(self, commit: str, onto: str) -> str:
+        """把 ``commit`` 这一次改动应用到 ``onto`` 上,返回结果树。
+
+        就是 cherry-pick,由 git 用三方合并算出来,不碰工作区、不碰主索引。
+        (``merge-tree --merge-base`` 要 git 2.40,这里用临时索引做,2.39 也行。)
+        """
+        parents = self.parents(commit)
+        base = f"{parents[0]}^{{tree}}" if parents else self.empty_tree()
+        idx = self.git_dir / f"cb-index-{commit[:12]}"
+        env = {**_env(), "GIT_INDEX_FILE": str(idx)}
+        try:
+            for args in (
+                ["read-tree", "-i", "-m", "--aggressive", base, f"{onto}^{{tree}}", f"{commit}^{{tree}}"],
+                ["write-tree"],
+            ):
+                proc = subprocess.run(
+                    ["git", *args], cwd=self.root, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                if proc.returncode != 0:
+                    raise GitError(args, proc.returncode, proc.stderr.decode())
+                out = proc.stdout
+            return out.decode().strip()
+        finally:
+            idx.unlink(missing_ok=True)
+
     def empty_tree(self) -> str:
         return self.text("hash-object", "-t", "tree", "/dev/null")
 
